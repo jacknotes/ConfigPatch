@@ -415,3 +415,80 @@ func TestExecSkipsWhenNoLongerMatches(t *testing.T) {
 		t.Errorf("original was modified: %q", got)
 	}
 }
+
+func TestScanStopsWhenCancelled(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"site1", "site2"} {
+		dir := filepath.Join(root, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "web.config"), []byte("<add key=\"k\" value=\"abc\" />"), 0o666); err != nil {
+			t.Fatal(err)
+		}
+	}
+	calls := 0
+	c := Config{
+		RootDirs:  []string{root},
+		FileNames: []string{"web.config"},
+		OldValue:  "abc",
+		NewValue:  "xyz",
+		Cancel: func() bool {
+			calls++
+			return calls >= 4 // root + site1 + site1/web.config(命中) + site2 时停止
+		},
+	}
+	hits, derrs, err := Scan(c)
+	if err != ErrCancelled {
+		t.Fatalf("expected ErrCancelled, got %v", err)
+	}
+	if len(derrs) != 0 {
+		t.Errorf("expected no dir errors, got %+v", derrs)
+	}
+	if len(hits) < 1 {
+		t.Errorf("expected partial hits, got %d", len(hits))
+	}
+}
+
+func TestExecCancelled(t *testing.T) {
+	root := t.TempDir()
+	cfgFile := filepath.Join(root, "web.config")
+	content := "<add key=\"k\" value=\"abc\" />"
+	if err := os.WriteFile(cfgFile, []byte(content), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	// 仅在执行阶段模拟取消：扫描需先成功拿到命中，执行时才中止。
+	cancelled := false
+	c := Config{
+		RootDirs:  []string{root},
+		FileNames: []string{"web.config"},
+		OldValue:  "abc",
+		NewValue:  "xyz",
+		Cancel:    func() bool { return cancelled },
+	}
+	hits, _, err := Scan(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("expected 1 hit, got %d", len(hits))
+	}
+	cancelled = true // 执行阶段用户请求中止
+	res := ExecOne(hits[0], c)
+	if res.Err != nil {
+		t.Fatalf("expected no error, got %v", res.Err)
+	}
+	if res.Skipped == "" {
+		t.Fatalf("expected skipped (cancelled), got %+v", res)
+	}
+	if res.BackupPath != "" || res.NewFilePath != "" {
+		t.Errorf("cancelled exec must not create backup/new files, got backup=%q new=%q", res.BackupPath, res.NewFilePath)
+	}
+	got, _ := os.ReadFile(cfgFile)
+	if string(got) != content {
+		t.Errorf("original was modified: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(root, "backup-config")); !os.IsNotExist(err) {
+		t.Errorf("backup-config dir should not exist after cancelled exec")
+	}
+}

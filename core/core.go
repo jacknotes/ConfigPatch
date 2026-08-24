@@ -15,6 +15,9 @@ import (
 // under the configured comparison rule. The GUI shows a warning and aborts.
 var ErrSameValue = errors.New("新值和原值一样，无需操作")
 
+// ErrCancelled 表示操作被用户请求中止（扫描未完成 / 替换未全部执行）。
+var ErrCancelled = errors.New("操作已被用户中止")
+
 // Config carries the user's inputs for one scan/exec cycle.
 type Config struct {
 	RootDirs      []string // target roots; each is scanned recursively
@@ -26,6 +29,8 @@ type Config struct {
 	// ExecOne (处理 → 备份 → 生成新文件 → 覆盖 → 校验/回滚). It is optional
 	// and must be safe to call from the goroutine that runs ExecOne.
 	Logf func(format string, args ...interface{})
+	// Cancel 返回 true 表示用户请求停止当前操作；nil 表示不支持取消。
+	Cancel func() bool
 }
 
 // Validate checks inputs and returns a user-facing error if anything is wrong.
@@ -102,6 +107,9 @@ func Scan(c Config) (hits []Hit, dirErrors []ScanError, err error) {
 	for _, root := range c.RootDirs {
 		root = strings.TrimSpace(root)
 		werr := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+			if c.Cancel != nil && c.Cancel() {
+				return ErrCancelled
+			}
 			if walkErr != nil {
 				dirErrors = append(dirErrors, ScanError{Path: path, Err: walkErr})
 				if d != nil && d.IsDir() {
@@ -207,6 +215,11 @@ type ExecResult struct {
 //  5. verify the original now contains NewValue; roll back from the snapshot on failure
 func ExecOne(h Hit, c Config) ExecResult {
 	res := ExecResult{Hit: h}
+	// 用户已请求停止：不读取、不触碰原文件，也不创建备份目录。
+	if c.Cancel != nil && c.Cancel() {
+		res.Skipped = "用户已请求中止"
+		return res
+	}
 	dir := filepath.Dir(h.Path)
 	base, ext := splitExt(filepath.Base(h.Path))
 
