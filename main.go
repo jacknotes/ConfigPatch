@@ -38,11 +38,12 @@ type MainWin struct {
 	status  *walk.StatusBarItem
 
 	// runtime state
-	dirs       []string // source of truth for the target directory list
-	lastHits   []core.Hit
-	busy       bool
-	closed     bool
-	cancelScan atomic.Bool // 停止标志：UI 线程写，工作 goroutine 读
+	dirs        []string // source of truth for the target directory list
+	lastHits    []core.Hit
+	busy        bool
+	closed      bool
+	cancelScan  atomic.Bool // 停止标志：UI 线程写，工作 goroutine 读
+	scanPartial bool        // 最近一次扫描是否被中止（仅部分结果）；仅 UI 线程读写
 }
 
 func main() {
@@ -274,6 +275,7 @@ func (mw *MainWin) onScan() {
 		return
 	}
 	mw.cancelScan.Store(false)
+	mw.scanPartial = false
 	cfg.Cancel = func() bool { return mw.cancelScan.Load() }
 	mw.setBusy(true)
 	mw.logf("==== 开始扫描 ====")
@@ -289,12 +291,16 @@ func (mw *MainWin) onScan() {
 				return
 			}
 			if serr == core.ErrCancelled {
+				mw.scanPartial = true
 				mw.lastHits = hits
 				paths := make([]string, 0, len(hits))
 				for _, h := range hits {
 					paths = append(paths, h.Path)
 				}
 				mw.hitsList.SetModel(paths)
+				for _, de := range dirErrs {
+					mw.logf("  跳过不可访问项: %s（%v）", de.Path, de.Err)
+				}
 				mw.logf("扫描已停止：命中 %d 个配置文件（未完成，仅部分结果）", len(hits))
 				mw.status.SetText(fmt.Sprintf("扫描已停止，命中 %d 个（部分结果）", len(hits)))
 				return
@@ -336,7 +342,11 @@ func (mw *MainWin) onExec() {
 		walk.MsgBox(mw, "提示", "请先点击「扫描预览」生成命中列表，确认后再执行替换。", walk.MsgBoxIconInformation)
 		return
 	}
-	if r := walk.MsgBox(mw, "确认执行", fmt.Sprintf("将对 %d 个命中文件执行「备份 → 生成新文件 → 覆盖原文件」，是否继续？", len(mw.lastHits)), walk.MsgBoxYesNo|walk.MsgBoxIconQuestion); r != walk.DlgCmdYes {
+	confirmMsg := fmt.Sprintf("将对 %d 个命中文件执行「备份 → 生成新文件 → 覆盖原文件」，是否继续？", len(mw.lastHits))
+	if mw.scanPartial {
+		confirmMsg = "警告：上次扫描已被停止，命中列表可能不完整（仅部分结果）。\n\n" + confirmMsg
+	}
+	if r := walk.MsgBox(mw, "确认执行", confirmMsg, walk.MsgBoxYesNo|walk.MsgBoxIconQuestion); r != walk.DlgCmdYes {
 		mw.logf("已取消执行")
 		return
 	}
@@ -378,7 +388,7 @@ func (mw *MainWin) onExec() {
 		okCount, skipCount, failCount := 0, 0, 0
 		stopped := false
 		for _, h := range mw.lastHits {
-			if mw.cancelScan.Load() {
+			if cfg.Cancel() {
 				stopped = true
 				break
 			}
@@ -400,6 +410,8 @@ func (mw *MainWin) onExec() {
 				okCount++
 			}
 		}
+		// 若停止请求恰好在最后一个文件处理期间到达，汇总仍如实标记为已中止
+		stopped = stopped || mw.cancelScan.Load()
 		var summary string
 		if stopped {
 			summary = fmt.Sprintf("已中止：成功 %d，跳过 %d，失败 %d，已处理 %d/%d 个文件", okCount, skipCount, failCount, okCount+skipCount+failCount, len(mw.lastHits))
