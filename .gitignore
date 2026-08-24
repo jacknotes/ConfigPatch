@@ -1,0 +1,9 @@
+# 编译产物
+ConfigPatch.exe
+*.exe
+
+# 运行时日志（可能包含真实目标路径，不应提交）
+logs/
+
+# 备份目录（如误在项目目录运行）
+backup-config/
