@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"configpatch/core"
@@ -29,6 +30,7 @@ type MainWin struct {
 
 	scanBtn *walk.PushButton
 	execBtn *walk.PushButton
+	stopBtn *walk.PushButton
 
 	hitsList *walk.ListBox
 
@@ -36,10 +38,11 @@ type MainWin struct {
 	status  *walk.StatusBarItem
 
 	// runtime state
-	dirs     []string // source of truth for the target directory list
-	lastHits []core.Hit
-	busy     bool
-	closed   bool
+	dirs       []string // source of truth for the target directory list
+	lastHits   []core.Hit
+	busy       bool
+	closed     bool
+	cancelScan atomic.Bool // 停止标志：UI 线程写，工作 goroutine 读
 }
 
 func main() {
@@ -114,6 +117,7 @@ func main() {
 				Children: []decl.Widget{
 					decl.PushButton{AssignTo: &mw.scanBtn, Text: "① 扫描预览", OnClicked: mw.onScan},
 					decl.PushButton{AssignTo: &mw.execBtn, Text: "② 执行替换（需先扫描）", OnClicked: mw.onExec},
+					decl.PushButton{AssignTo: &mw.stopBtn, Text: "③ 停止", OnClicked: mw.onStop, Enabled: false},
 				},
 			},
 			decl.GroupBox{
@@ -148,6 +152,7 @@ func main() {
 	}
 	mw.Closing().Attach(func(canceled *bool, reason walk.CloseReason) {
 		mw.closed = true
+		mw.cancelScan.Store(true) // 关闭窗口同时停止后台扫描/替换
 	})
 	if code := mw.Run(); code != 0 {
 		os.Exit(code)
@@ -226,6 +231,13 @@ func (mw *MainWin) clearDirs() {
 	mw.refreshDirs()
 }
 
+// onStop 请求停止正在进行的扫描或替换。
+func (mw *MainWin) onStop() {
+	mw.cancelScan.Store(true)
+	mw.logf("用户请求停止，正在中断…")
+	mw.status.SetText("正在停止...")
+}
+
 // ---------- config building ----------
 
 func (mw *MainWin) buildConfig() (core.Config, error) {
@@ -261,6 +273,8 @@ func (mw *MainWin) onScan() {
 		mw.showConfigError(err)
 		return
 	}
+	mw.cancelScan.Store(false)
+	cfg.Cancel = func() bool { return mw.cancelScan.Load() }
 	mw.setBusy(true)
 	mw.logf("==== 开始扫描 ====")
 	mw.logf("目标目录 %d 个，配置文件 %v，原值 %q", len(cfg.RootDirs), cfg.FileNames, cfg.OldValue)
@@ -272,6 +286,17 @@ func (mw *MainWin) onScan() {
 		mw.Synchronize(func() {
 			defer mw.setBusy(false)
 			if mw.closed {
+				return
+			}
+			if serr == core.ErrCancelled {
+				mw.lastHits = hits
+				paths := make([]string, 0, len(hits))
+				for _, h := range hits {
+					paths = append(paths, h.Path)
+				}
+				mw.hitsList.SetModel(paths)
+				mw.logf("扫描已停止：命中 %d 个配置文件（未完成，仅部分结果）", len(hits))
+				mw.status.SetText(fmt.Sprintf("扫描已停止，命中 %d 个（部分结果）", len(hits)))
 				return
 			}
 			if serr != nil {
@@ -316,6 +341,9 @@ func (mw *MainWin) onExec() {
 		return
 	}
 
+	mw.cancelScan.Store(false)
+	cfg.Cancel = func() bool { return mw.cancelScan.Load() }
+
 	// open the run log file (best effort; failure is non-fatal)
 	logf, lerr := openRunLog()
 	if lerr != nil {
@@ -348,7 +376,12 @@ func (mw *MainWin) onExec() {
 	mw.logf("==== 开始执行替换（共 %d 个文件） ====", len(mw.lastHits))
 	go func() {
 		okCount, skipCount, failCount := 0, 0, 0
+		stopped := false
 		for _, h := range mw.lastHits {
+			if mw.cancelScan.Load() {
+				stopped = true
+				break
+			}
 			res := core.ExecOne(h, cfg)
 			line := formatResult(res)
 			mw.Synchronize(func() {
@@ -367,7 +400,12 @@ func (mw *MainWin) onExec() {
 				okCount++
 			}
 		}
-		summary := fmt.Sprintf("执行完成：成功 %d，跳过 %d，失败 %d，耗时 %s", okCount, skipCount, failCount, time.Since(start).Round(time.Millisecond))
+		var summary string
+		if stopped {
+			summary = fmt.Sprintf("已中止：成功 %d，跳过 %d，失败 %d，已处理 %d/%d 个文件", okCount, skipCount, failCount, okCount+skipCount+failCount, len(mw.lastHits))
+		} else {
+			summary = fmt.Sprintf("执行完成：成功 %d，跳过 %d，失败 %d，耗时 %s", okCount, skipCount, failCount, time.Since(start).Round(time.Millisecond))
+		}
 		if logf != nil {
 			writeLogLine(logf, "==== "+summary+" ====")
 			logf.Close()
@@ -398,6 +436,7 @@ func (mw *MainWin) setBusy(b bool) {
 	mw.busy = b
 	mw.scanBtn.SetEnabled(!b)
 	mw.execBtn.SetEnabled(!b)
+	mw.stopBtn.SetEnabled(b)
 }
 
 func (mw *MainWin) logf(format string, args ...interface{}) {
