@@ -298,20 +298,25 @@ func (mw *MainWin) initConfig() {
 
 // collectProfile 从界面采集当前配置（不做校验）。
 func (mw *MainWin) collectProfile() configstore.Profile {
+	return configstore.Profile{
+		RootDirs:      append([]string(nil), mw.dirs...), // 深拷贝，避免与界面目录列表共享底层数组
+		FileNames:     parseFileNames(mw.namesEdit.Text()),
+		OldValue:      mw.oldEdit.Text(),
+		NewValue:      mw.newEdit.Text(),
+		CaseOnlyAllow: mw.caseCk.Checked(),
+	}
+}
+
+// parseFileNames 把逗号分隔的文件名文本解析为去空白的列表。
+func parseFileNames(text string) []string {
 	var names []string
-	for _, n := range strings.Split(mw.namesEdit.Text(), ",") {
+	for _, n := range strings.Split(text, ",") {
 		n = strings.TrimSpace(n)
 		if n != "" {
 			names = append(names, n)
 		}
 	}
-	return configstore.Profile{
-		RootDirs:      append([]string(nil), mw.dirs...), // 深拷贝，避免与界面目录列表共享底层数组
-		FileNames:     names,
-		OldValue:      mw.oldEdit.Text(),
-		NewValue:      mw.newEdit.Text(),
-		CaseOnlyAllow: mw.caseCk.Checked(),
-	}
+	return names
 }
 
 // applyProfile 把配置填充回界面控件。
@@ -384,9 +389,11 @@ func (mw *MainWin) onSaveProfile() {
 	p.Name = name
 	mw.store.Profiles[name] = p
 	if !mw.persist() {
+		delete(mw.store.Profiles, name) // 落盘失败则不保留未持久化的方案
 		return
 	}
 	mw.refreshProfilesCombo()
+	mw.profilesCombo.SetText(name) // 恢复刚输入/选中的方案名
 	mw.logf("已保存方案「%s」", name)
 }
 
@@ -433,16 +440,9 @@ func (mw *MainWin) onRollback() {
 // ---------- config building ----------
 
 func (mw *MainWin) buildConfig() (core.Config, error) {
-	var names []string
-	for _, n := range strings.Split(mw.namesEdit.Text(), ",") {
-		n = strings.TrimSpace(n)
-		if n != "" {
-			names = append(names, n)
-		}
-	}
 	cfg := core.Config{
 		RootDirs:      mw.dirs,
-		FileNames:     names,
+		FileNames:     parseFileNames(mw.namesEdit.Text()),
 		OldValue:      mw.oldEdit.Text(),
 		NewValue:      mw.newEdit.Text(),
 		CaseOnlyAllow: mw.caseCk.Checked(),

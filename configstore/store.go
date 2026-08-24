@@ -109,6 +109,7 @@ func (s *Store) PushHistory(p Profile) {
 }
 
 // Rollback 取出最近一个历史快照作为新的 last 返回；历史为空时返回 false。
+// 返回的是独立副本，调用方修改返回值不会影响 store 内部状态。
 func (s *Store) Rollback() (Profile, bool) {
 	if len(s.History) == 0 {
 		return Profile{}, false
@@ -118,9 +119,9 @@ func (s *Store) Rollback() (Profile, bool) {
 	if s.Last != nil {
 		s.push(*s.Last)
 	}
-	cp := p.clone()
-	s.Last = &cp
-	return cp, true
+	last := p.clone()
+	s.Last = &last
+	return p.clone(), true
 }
 
 // push 把 p 压入历史队首；与队首相同则跳过（连续去重），并裁剪到 MaxHistory。

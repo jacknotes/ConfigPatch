@@ -57,6 +57,42 @@ func TestLoadCorruptReturnsEmpty(t *testing.T) {
 	if len(s.Profiles) != 0 {
 		t.Errorf("expected empty store on corrupt, got %+v", s)
 	}
+	if s.Last != nil || len(s.History) != 0 {
+		t.Errorf("expected empty last/history on corrupt, got last=%+v history=%v", s.Last, s.History)
+	}
+}
+
+func TestSaveLastClonesInput(t *testing.T) {
+	s := &Store{Profiles: map[string]Profile{}}
+	p := Profile{Name: "A", RootDirs: []string{"d1"}, FileNames: []string{"web.config"}, OldValue: "a", NewValue: "b"}
+	s.SaveLast(p)
+	p.RootDirs[0] = "MUTATED" // 调用方后续修改不得影响已存 last
+	if s.Last == nil || s.Last.RootDirs[0] != "d1" {
+		t.Errorf("SaveLast must not alias caller slice, got %+v", s.Last)
+	}
+}
+
+func TestPushHistoryClonesInput(t *testing.T) {
+	s := &Store{Profiles: map[string]Profile{}}
+	p := Profile{Name: "A", RootDirs: []string{"d1"}}
+	s.PushHistory(p)
+	p.RootDirs[0] = "MUTATED"
+	if len(s.History) != 1 || s.History[0].RootDirs[0] != "d1" {
+		t.Errorf("PushHistory must not alias caller slice, got %+v", s.History)
+	}
+}
+
+func TestRollbackReturnsClone(t *testing.T) {
+	s := &Store{Profiles: map[string]Profile{}}
+	s.PushHistory(Profile{Name: "A", RootDirs: []string{"d1"}})
+	r, ok := s.Rollback()
+	if !ok {
+		t.Fatal("expected rollback available")
+	}
+	r.RootDirs[0] = "MUTATED" // 返回值修改不得影响 store 内 last
+	if s.Last == nil || s.Last.RootDirs[0] != "d1" {
+		t.Errorf("rollback return must not alias store last, got %+v", s.Last)
+	}
 }
 
 func TestSaveLastHistory(t *testing.T) {
