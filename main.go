@@ -133,6 +133,7 @@ func main() {
 					decl.TextEdit{
 						AssignTo: &mw.logEdit,
 						ReadOnly: true,
+						VScroll:  true, // 显示垂直滚动条，日志超出时可滚动查看
 						MinSize:  decl.Size{Height: 120},
 					},
 				},
@@ -320,6 +321,26 @@ func (mw *MainWin) onExec() {
 	if lerr != nil {
 		mw.logf("警告：无法写入日志文件（%v），本次仅界面显示日志", lerr)
 	}
+	if logf != nil {
+		// self-contained header: each log file records the inputs it was run with
+		writeLogLine(logf, "==== 开始执行替换 ====")
+		writeLogLine(logf, "目标目录: "+strings.Join(cfg.RootDirs, "; "))
+		writeLogLine(logf, "配置文件: "+strings.Join(cfg.FileNames, ", "))
+		writeLogLine(logf, fmt.Sprintf("原值: %q", cfg.OldValue))
+		writeLogLine(logf, fmt.Sprintf("新值: %q", cfg.NewValue))
+	}
+
+	// route detailed per-step progress from core to both the UI and the file
+	cfg.Logf = func(format string, args ...interface{}) {
+		line := fmt.Sprintf(format, args...)
+		mw.Synchronize(func() {
+			if mw.closed {
+				return
+			}
+			mw.logf("%s", line)
+		})
+		writeLogLine(logf, line)
+	}
 
 	mw.setBusy(true)
 	mw.status.SetText("执行中...")
@@ -336,9 +357,7 @@ func (mw *MainWin) onExec() {
 				}
 				mw.logf("%s", line)
 			})
-			if logf != nil {
-				fmt.Fprintln(logf, line)
-			}
+			writeLogLine(logf, line)
 			switch {
 			case res.Err != nil:
 				failCount++
@@ -348,10 +367,11 @@ func (mw *MainWin) onExec() {
 				okCount++
 			}
 		}
+		summary := fmt.Sprintf("执行完成：成功 %d，跳过 %d，失败 %d，耗时 %s", okCount, skipCount, failCount, time.Since(start).Round(time.Millisecond))
 		if logf != nil {
+			writeLogLine(logf, "==== "+summary+" ====")
 			logf.Close()
 		}
-		summary := fmt.Sprintf("执行完成：成功 %d，跳过 %d，失败 %d，耗时 %s", okCount, skipCount, failCount, time.Since(start).Round(time.Millisecond))
 		mw.Synchronize(func() {
 			if mw.closed {
 				return
@@ -381,9 +401,14 @@ func (mw *MainWin) setBusy(b bool) {
 }
 
 func (mw *MainWin) logf(format string, args ...interface{}) {
-	line := fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
+	line := fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05.000"), fmt.Sprintf(format, args...))
 	mw.logEdit.AppendText(line + "\r\n")
+	// 滚动到底部并强制整窗重绘：标准多行 EDIT 控件在程序化追加文本并滚动后，
+	// 新暴露区域不会自动重绘，会表现为日志显示不全、鼠标选中后才出现，
+	// 这里强制 Invalidate + UpdateWindow 立即重绘。
 	mw.logEdit.SendMessage(win.WM_VSCROLL, uintptr(win.SB_BOTTOM), 0)
+	win.InvalidateRect(mw.logEdit.Handle(), nil, false)
+	win.UpdateWindow(mw.logEdit.Handle())
 }
 
 func formatResult(res core.ExecResult) string {
@@ -397,8 +422,11 @@ func formatResult(res core.ExecResult) string {
 		res.Path, res.ReplacedCount, res.BackupPath, res.NewFilePath)
 }
 
-// openRunLog opens (creating if needed) a per-run log file under ./logs next
-// to the executable. Returns nil if logging to disk is unavailable.
+// openRunLog opens a fresh per-run log file under ./logs next to the
+// executable. The name carries millisecond precision (run-YYYYMMDD-HHMMSS.mmm)
+// and never collides with an existing file: a same-millisecond run gets _1, _2,
+// ... appended instead of appending to the same file. Returns an error if the
+// log directory cannot be created or the file cannot be opened.
 func openRunLog() (*os.File, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -408,6 +436,28 @@ func openRunLog() (*os.File, error) {
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return nil, err
 	}
-	name := filepath.Join(logDir, "run-"+time.Now().Format("20060102-150405")+".log")
-	return os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o666)
+	ts := time.Now().Format("20060102-150405.000")
+	for i := 0; ; i++ {
+		name := filepath.Join(logDir, "run-"+ts+".log")
+		if i > 0 {
+			name = filepath.Join(logDir, fmt.Sprintf("run-%s_%d.log", ts, i))
+		}
+		f, err := os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o666)
+		if err == nil {
+			return f, nil
+		}
+		if !os.IsExist(err) {
+			return nil, err
+		}
+	}
+}
+
+// writeLogLine appends one timestamped line (full date/time with milliseconds)
+// to the run log, so every entry is self-describing and chronologically
+// ordered. A nil file is ignored (logging to disk unavailable).
+func writeLogLine(f *os.File, line string) {
+	if f == nil {
+		return
+	}
+	fmt.Fprintf(f, "[%s] %s\r\n", time.Now().Format("2006-01-02 15:04:05.000"), line)
 }

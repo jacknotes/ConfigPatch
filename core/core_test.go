@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -326,6 +327,60 @@ func TestScanAndExec(t *testing.T) {
 	want := strings.ReplaceAll(content, "http://hlog.example.com:9200", "http://hlog.example.com:9201")
 	if string(nw) != want {
 		t.Errorf("new file content mismatch:\n got=%q\nwant=%q", nw, want)
+	}
+}
+
+func TestExecLogsSteps(t *testing.T) {
+	root := t.TempDir()
+	cfgFile := filepath.Join(root, "web.config")
+	content := "<add key=\"k\" value=\"abc\" />"
+	if err := os.WriteFile(cfgFile, []byte(content), 0o666); err != nil {
+		t.Fatal(err)
+	}
+
+	var lines []string
+	c := Config{
+		RootDirs:  []string{root},
+		FileNames: []string{"web.config"},
+		OldValue:  "abc",
+		NewValue:  "xyz",
+		Logf: func(format string, args ...interface{}) {
+			lines = append(lines, fmt.Sprintf(format, args...))
+		},
+	}
+
+	hits, _, err := Scan(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("expected 1 hit, got %d", len(hits))
+	}
+
+	res := ExecOne(hits[0], c)
+	if res.Err != nil {
+		t.Fatalf("exec failed: %v", res.Err)
+	}
+	if res.Verified != true {
+		t.Fatal("expected verified")
+	}
+
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{"处理:", "确认仍包含原值", "备份原文件", "生成新文件", "覆盖原文件", "校验通过"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("step log missing %q; got:\n%s", want, joined)
+		}
+	}
+
+	// the stages must be recorded in chronological order
+	order := []string{"处理:", "确认仍包含原值", "备份原文件", "生成新文件", "覆盖原文件", "校验通过"}
+	last := -1
+	for _, s := range order {
+		idx := strings.Index(joined, s)
+		if idx <= last {
+			t.Errorf("step %q out of order; got:\n%s", s, joined)
+		}
+		last = idx
 	}
 }
 

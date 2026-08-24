@@ -22,6 +22,10 @@ type Config struct {
 	OldValue      string   // string to find (case-insensitive)
 	NewValue      string   // string to replace with (exact text written)
 	CaseOnlyAllow bool     // true: new==old compared exactly (allows case-only change); false: case-insensitive
+	// Logf, when non-nil, receives detailed step-by-step progress during
+	// ExecOne (处理 → 备份 → 生成新文件 → 覆盖 → 校验/回滚). It is optional
+	// and must be safe to call from the goroutine that runs ExecOne.
+	Logf func(format string, args ...interface{})
 }
 
 // Validate checks inputs and returns a user-facing error if anything is wrong.
@@ -206,6 +210,17 @@ func ExecOne(h Hit, c Config) ExecResult {
 	dir := filepath.Dir(h.Path)
 	base, ext := splitExt(filepath.Base(h.Path))
 
+	// step emits one line of step progress when a logger is configured; the
+	// "处理" line is the per-file header and every step is indented beneath it.
+	step := func(format string, args ...interface{}) {
+		if c.Logf != nil {
+			c.Logf(format, args...)
+		}
+	}
+	if c.Logf != nil {
+		c.Logf("处理: %s", h.Path)
+	}
+
 	backupDir := filepath.Join(dir, "backup-config")
 	if err := os.MkdirAll(backupDir, 0o755); err != nil {
 		res.Err = fmt.Errorf("创建备份目录失败: %v", err)
@@ -226,8 +241,10 @@ func ExecOne(h Hit, c Config) ExecResult {
 	}
 	if !ContainsCI(text, c.OldValue) {
 		res.Skipped = "执行时已不再包含原字符串，已跳过"
+		step("  - 跳过: %s", res.Skipped)
 		return res
 	}
+	step("  - 确认仍包含原值")
 
 	// 1) snapshot the original bytes (never overwrite an existing backup)
 	ts := time.Now().Format("20060102150405")
@@ -237,6 +254,7 @@ func ExecOne(h Hit, c Config) ExecResult {
 		return res
 	}
 	res.BackupPath = backupPath
+	step("  - 备份原文件 → %s", backupPath)
 
 	// 2) build the modified copy with the ORIGINAL encoding
 	newText, n := ReplaceAllCI(text, c.OldValue, c.NewValue)
@@ -252,24 +270,29 @@ func ExecOne(h Hit, c Config) ExecResult {
 		return res
 	}
 	res.NewFilePath = newFilePath
+	step("  - 生成新文件 → %s", newFilePath)
 
 	// 3) copy the modified copy over the original
 	if err := overwriteFile(h.Path, newFilePath); err != nil {
 		res.Err = fmt.Errorf("覆盖原文件失败: %v", err)
 		return res
 	}
+	step("  - 覆盖原文件")
 
 	// 4) verify the original now contains NewValue; roll back on failure
 	verifyText, verr := ReadText(h.Path)
 	if verr == nil && ContainsCI(verifyText, c.NewValue) {
 		res.Verified = true
+		step("  - 校验通过（替换 %d 处）", res.ReplacedCount)
 		return res
 	}
+	step("  - 校验失败，尝试回滚")
 	if rbErr := overwriteFile(h.Path, backupPath); rbErr != nil {
 		res.Err = fmt.Errorf("替换后校验失败，且回滚失败: %v（请手动用备份恢复: %s）", verr, backupPath)
 		return res
 	}
 	res.RolledBack = true
+	step("  - 已回滚原文件")
 	if verr != nil {
 		res.Err = fmt.Errorf("替换后校验失败（读取错误: %v），已自动回滚", verr)
 	} else {
