@@ -114,3 +114,7 @@ go test ./...
 ## 优化记录（2026-08-24，v3）
 
 1. **停止/中止支持**：新增「③ 停止」按钮；`Config` 增加 `Cancel func() bool` 回调，`Scan` 在 `WalkDir` 回调内检查（返回哨兵 `ErrCancelled`，保留部分命中），`ExecOne` 入口兜底检查；执行主循环在每个文件之间检查。扫描停止保留部分结果并提示"未完成，仅部分结果"；替换中止保留已处理完的文件（各有备份）。关闭窗口同时置位停止标志，真正停止后台任务。详见 `2026-08-24-stop-abort-feature-design.md`。
+
+## 优化记录（2026-08-24，v4）
+
+1. **配置方案保存/加载**：新增 `configstore` 包（`config.json`，存于 exe 同目录、已 gitignore）：命名方案（保存/加载/覆盖/删除）、`last` 上次配置自动记忆（变更防抖 500ms + 关闭兜底）、`history` 最近 5 版历史回滚；自动保存只写 `last`/`history`，绝不覆盖命名方案。详见 `2026-08-24-config-profiles-design.md`。
