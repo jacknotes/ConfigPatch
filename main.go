@@ -6,10 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"configpatch/configstore"
 	"configpatch/core"
 
 	"github.com/lxn/walk"
@@ -32,6 +34,12 @@ type MainWin struct {
 	execBtn *walk.PushButton
 	stopBtn *walk.PushButton
 
+	saveProfileBtn *walk.PushButton
+	loadProfileBtn *walk.PushButton
+	delProfileBtn  *walk.PushButton
+	rollbackBtn    *walk.PushButton
+	profilesCombo  *walk.ComboBox
+
 	hitsList *walk.ListBox
 
 	logEdit *walk.TextEdit
@@ -44,6 +52,10 @@ type MainWin struct {
 	closed      bool
 	cancelScan  atomic.Bool // 停止标志：UI 线程写，工作 goroutine 读
 	scanPartial bool        // 最近一次扫描是否被中止（仅部分结果）；仅 UI 线程读写
+
+	store         *configstore.Store
+	configPath    string
+	autosaveTimer *time.Timer // 变更防抖自动保存计时器
 }
 
 func main() {
@@ -57,6 +69,22 @@ func main() {
 		Size:     decl.Size{Width: 880, Height: 700},
 		Layout:   decl.VBox{MarginsZero: false, Spacing: 6},
 		Children: []decl.Widget{
+			decl.GroupBox{
+				Title:  "配置方案（保存 / 加载 / 删除 / 回滚）",
+				Layout: decl.VBox{Spacing: 4},
+				Children: []decl.Widget{
+					decl.ComboBox{AssignTo: &mw.profilesCombo, Editable: true},
+					decl.Composite{
+						Layout: decl.HBox{Spacing: 6},
+						Children: []decl.Widget{
+							decl.PushButton{AssignTo: &mw.saveProfileBtn, Text: "保存为方案", OnClicked: mw.onSaveProfile},
+							decl.PushButton{AssignTo: &mw.loadProfileBtn, Text: "加载", OnClicked: mw.onLoadProfile},
+							decl.PushButton{AssignTo: &mw.delProfileBtn, Text: "删除", OnClicked: mw.onDeleteProfile},
+							decl.PushButton{AssignTo: &mw.rollbackBtn, Text: "回滚上一版", OnClicked: mw.onRollback},
+						},
+					},
+				},
+			},
 			decl.GroupBox{
 				Title:  "目标目录（可添加多个，各自递归扫描，支持本地 / UNC 共享）",
 				Layout: decl.VBox{Spacing: 6},
@@ -96,15 +124,16 @@ func main() {
 				Layout: decl.Grid{Columns: 2, Spacing: 6},
 				Children: []decl.Widget{
 					decl.Label{Text: "配置文件名称（多个用逗号分隔）"},
-					decl.LineEdit{AssignTo: &mw.namesEdit, Text: "web.config"},
+					decl.LineEdit{AssignTo: &mw.namesEdit, Text: "web.config", OnTextChanged: mw.scheduleAutosave},
 					decl.Label{Text: "原字符串（查找并替换，不区分大小写）"},
-					decl.LineEdit{AssignTo: &mw.oldEdit},
+					decl.LineEdit{AssignTo: &mw.oldEdit, OnTextChanged: mw.scheduleAutosave},
 					decl.Label{Text: "新字符串（替换为）"},
-					decl.LineEdit{AssignTo: &mw.newEdit},
+					decl.LineEdit{AssignTo: &mw.newEdit, OnTextChanged: mw.scheduleAutosave},
 					decl.CheckBox{
-						AssignTo:   &mw.caseCk,
-						Text:       "允许仅大小写变更",
-						ColumnSpan: 2,
+						AssignTo:         &mw.caseCk,
+						Text:             "允许仅大小写变更",
+						ColumnSpan:       2,
+						OnCheckedChanged: mw.scheduleAutosave,
 					},
 					decl.Label{
 						Text:       "说明：勾选后，新值与原值仅大小写不同也会执行替换；不勾选则视为相同并中止。",
@@ -151,9 +180,11 @@ func main() {
 	if err := app.Create(); err != nil {
 		log.Fatal(err)
 	}
+	mw.initConfig()
 	mw.Closing().Attach(func(canceled *bool, reason walk.CloseReason) {
 		mw.closed = true
 		mw.cancelScan.Store(true) // 关闭窗口同时停止后台扫描/替换
+		mw.saveLast()
 	})
 	if code := mw.Run(); code != 0 {
 		os.Exit(code)
@@ -185,6 +216,7 @@ func (mw *MainWin) addDir() {
 	}
 	mw.dirs = append(mw.dirs, p)
 	mw.refreshDirs()
+	mw.scheduleAutosave()
 	mw.logf("已添加目标目录: %s", p)
 }
 
@@ -195,6 +227,7 @@ func (mw *MainWin) delDir() {
 	}
 	mw.dirs = append(mw.dirs[:idx], mw.dirs[idx+1:]...)
 	mw.refreshDirs()
+	mw.scheduleAutosave()
 }
 
 // onPathKeyDown adds the typed path when Enter is pressed in the path input.
@@ -223,6 +256,7 @@ func (mw *MainWin) addDirFromText() {
 	}
 	mw.dirs = append(mw.dirs, p)
 	mw.refreshDirs()
+	mw.scheduleAutosave()
 	mw.pathEdit.SetText("")
 	mw.logf("已添加目标目录: %s", p)
 }
@@ -230,6 +264,7 @@ func (mw *MainWin) addDirFromText() {
 func (mw *MainWin) clearDirs() {
 	mw.dirs = nil
 	mw.refreshDirs()
+	mw.scheduleAutosave()
 }
 
 // onStop 请求停止正在进行的扫描或替换。
@@ -237,6 +272,155 @@ func (mw *MainWin) onStop() {
 	mw.cancelScan.Store(true)
 	mw.logf("用户请求停止，正在中断…")
 	mw.status.SetText("正在停止...")
+}
+
+// ---------- 配置方案：加载 / 保存 / 自动记忆 / 回滚 ----------
+
+// initConfig 加载配置文件并恢复到上次使用状态；在窗口创建后调用。
+func (mw *MainWin) initConfig() {
+	if exe, err := os.Executable(); err == nil {
+		mw.configPath = filepath.Join(filepath.Dir(exe), "config.json")
+	}
+	s, err := configstore.Load(mw.configPath)
+	if err != nil {
+		mw.logf("读取配置文件失败：%v（按空配置继续）", err)
+	}
+	mw.store = s
+	mw.refreshProfilesCombo()
+	if s.Last != nil {
+		mw.applyProfile(*s.Last)
+		mw.logf("已加载上次使用的配置")
+	}
+}
+
+// collectProfile 从界面采集当前配置（不做校验）。
+func (mw *MainWin) collectProfile() configstore.Profile {
+	var names []string
+	for _, n := range strings.Split(mw.namesEdit.Text(), ",") {
+		n = strings.TrimSpace(n)
+		if n != "" {
+			names = append(names, n)
+		}
+	}
+	return configstore.Profile{
+		RootDirs:      mw.dirs,
+		FileNames:     names,
+		OldValue:      mw.oldEdit.Text(),
+		NewValue:      mw.newEdit.Text(),
+		CaseOnlyAllow: mw.caseCk.Checked(),
+	}
+}
+
+// applyProfile 把配置填充回界面控件。
+func (mw *MainWin) applyProfile(p configstore.Profile) {
+	mw.dirs = append([]string(nil), p.RootDirs...)
+	mw.refreshDirs()
+	mw.namesEdit.SetText(strings.Join(p.FileNames, ","))
+	mw.oldEdit.SetText(p.OldValue)
+	mw.newEdit.SetText(p.NewValue)
+	mw.caseCk.SetChecked(p.CaseOnlyAllow)
+}
+
+// refreshProfilesCombo 用方案名（排序后）刷新下拉框。
+func (mw *MainWin) refreshProfilesCombo() {
+	names := make([]string, 0, len(mw.store.Profiles))
+	for n := range mw.store.Profiles {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	mw.profilesCombo.SetModel(names)
+	mw.rollbackBtn.SetEnabled(len(mw.store.History) > 0)
+}
+
+// scheduleAutosave 变更后防抖 500ms 自动保存 last；可被控件事件与目录变更调用。
+func (mw *MainWin) scheduleAutosave() {
+	if mw.autosaveTimer != nil {
+		mw.autosaveTimer.Stop()
+	}
+	mw.autosaveTimer = time.AfterFunc(500*time.Millisecond, func() {
+		mw.Synchronize(func() {
+			if mw.closed {
+				return
+			}
+			mw.saveLast()
+		})
+	})
+}
+
+// saveLast 把当前界面状态保存为 last（含历史压栈）并写盘；失败仅记日志。
+func (mw *MainWin) saveLast() {
+	if mw.store == nil || mw.configPath == "" {
+		return
+	}
+	mw.store.SaveLast(mw.collectProfile())
+	if err := configstore.Save(mw.configPath, mw.store); err != nil {
+		mw.logf("保存配置失败：%v", err)
+	}
+}
+
+func (mw *MainWin) onSaveProfile() {
+	name := strings.TrimSpace(mw.profilesCombo.Text())
+	if name == "" {
+		walk.MsgBox(mw, "提示", "请先在方案下拉框输入方案名称。", walk.MsgBoxIconInformation)
+		return
+	}
+	if _, exists := mw.store.Profiles[name]; exists {
+		if r := walk.MsgBox(mw, "确认", fmt.Sprintf("方案「%s」已存在，是否覆盖？", name), walk.MsgBoxYesNo|walk.MsgBoxIconQuestion); r != walk.DlgCmdYes {
+			return
+		}
+	}
+	p := mw.collectProfile()
+	p.Name = name
+	mw.store.Profiles[name] = p
+	if err := configstore.Save(mw.configPath, mw.store); err != nil {
+		mw.logf("保存配置失败：%v", err)
+		return
+	}
+	mw.refreshProfilesCombo()
+	mw.logf("已保存方案「%s」", name)
+}
+
+func (mw *MainWin) onLoadProfile() {
+	name := mw.profilesCombo.Text()
+	p, ok := mw.store.Profiles[name]
+	if !ok {
+		walk.MsgBox(mw, "提示", "请选择要加载的方案。", walk.MsgBoxIconInformation)
+		return
+	}
+	mw.store.PushHistory(mw.collectProfile()) // 当前状态入历史，可回滚
+	mw.applyProfile(p)
+	mw.refreshProfilesCombo()
+	mw.logf("已加载方案「%s」", name)
+}
+
+func (mw *MainWin) onDeleteProfile() {
+	name := mw.profilesCombo.Text()
+	if _, ok := mw.store.Profiles[name]; !ok {
+		return
+	}
+	if r := walk.MsgBox(mw, "确认", fmt.Sprintf("确定删除方案「%s」？", name), walk.MsgBoxYesNo|walk.MsgBoxIconQuestion); r != walk.DlgCmdYes {
+		return
+	}
+	delete(mw.store.Profiles, name)
+	if err := configstore.Save(mw.configPath, mw.store); err != nil {
+		mw.logf("保存配置失败：%v", err)
+	}
+	mw.refreshProfilesCombo()
+	mw.logf("已删除方案「%s」", name)
+}
+
+func (mw *MainWin) onRollback() {
+	p, ok := mw.store.Rollback()
+	if !ok {
+		walk.MsgBox(mw, "提示", "没有可回滚的历史版本。", walk.MsgBoxIconInformation)
+		return
+	}
+	mw.applyProfile(p)
+	if err := configstore.Save(mw.configPath, mw.store); err != nil {
+		mw.logf("保存配置失败：%v", err)
+	}
+	mw.refreshProfilesCombo()
+	mw.logf("已回滚到上一版配置")
 }
 
 // ---------- config building ----------
