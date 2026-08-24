@@ -4,6 +4,7 @@ package configstore
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"slices"
 )
 
@@ -28,6 +29,14 @@ func (p Profile) Equal(o Profile) bool {
 		p.CaseOnlyAllow == o.CaseOnlyAllow &&
 		slices.Equal(p.RootDirs, o.RootDirs) &&
 		slices.Equal(p.FileNames, o.FileNames)
+}
+
+// clone 返回深拷贝，避免与调用方共享切片底层数组。
+func (p Profile) clone() Profile {
+	c := p
+	c.RootDirs = append([]string(nil), p.RootDirs...)
+	c.FileNames = append([]string(nil), p.FileNames...)
+	return c
 }
 
 // Store 是整个配置文件内容的运行时表示。
@@ -57,20 +66,32 @@ func Load(path string) (*Store, error) {
 	return s, nil
 }
 
-// Save 原子写入配置：先写临时文件再重命名，避免写一半损坏。
+// Save 原子写入配置：先写同目录临时文件、Sync 后重命名，避免写一半损坏。
 func Save(path string, s *Store) error {
 	raw, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o666); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".config-*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	defer os.Remove(tmp.Name()) // 失败时清理残留临时文件（重命名成功后此处无文件，忽略错误）
+	if _, err := tmp.Write(raw); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
-// SaveLast 更新 last；若与旧 last 不同，把旧 last 压入历史队首（去重），并裁剪到 MaxHistory。
+// SaveLast 更新 last；若与旧 last 不同，把旧 last 压入历史队首（连续去重），并裁剪到 MaxHistory。
 func (s *Store) SaveLast(p Profile) {
 	if s.Last != nil && s.Last.Equal(p) {
 		return
@@ -78,7 +99,7 @@ func (s *Store) SaveLast(p Profile) {
 	if s.Last != nil {
 		s.push(*s.Last)
 	}
-	cp := p
+	cp := p.clone()
 	s.Last = &cp
 }
 
@@ -97,17 +118,17 @@ func (s *Store) Rollback() (Profile, bool) {
 	if s.Last != nil {
 		s.push(*s.Last)
 	}
-	cp := p
+	cp := p.clone()
 	s.Last = &cp
-	return p, true
+	return cp, true
 }
 
-// push 把 p 压入历史队首，与队首相同则去重，并裁剪到 MaxHistory。
+// push 把 p 压入历史队首；与队首相同则跳过（连续去重），并裁剪到 MaxHistory。
 func (s *Store) push(p Profile) {
 	if len(s.History) > 0 && s.History[0].Equal(p) {
 		return
 	}
-	s.History = append([]Profile{p}, s.History...)
+	s.History = append([]Profile{p.clone()}, s.History...)
 	if len(s.History) > MaxHistory {
 		s.History = s.History[:MaxHistory]
 	}

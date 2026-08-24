@@ -265,6 +265,8 @@ func (s *Store) push(p Profile) {
 }
 ```
 
+> 实现说明：设计文档中提及的 `AddProfile`/`DeleteProfile` 包装方法**有意省略**——方案增删即直接 `s.Profiles[name] = p` / `delete(...)`（与设计文档"直接操作 `Profiles` map"一致），避免无意义包装；其覆盖/删除持久化行为由补充测试 `TestProfileAddDelete` 覆盖。
+
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `cd /mnt/f/project/ConfigPatch && /usr/local/go/bin/go test ./configstore/ -v`

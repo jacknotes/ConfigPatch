@@ -83,8 +83,84 @@ func TestHistoryCap(t *testing.T) {
 	for i := 0; i < MaxHistory+3; i++ {
 		s.SaveLast(p(string(rune('A' + i))))
 	}
-	if len(s.History) > MaxHistory {
-		t.Errorf("history capped at %d, got %d", MaxHistory, len(s.History))
+	if len(s.History) != MaxHistory {
+		t.Fatalf("history should be exactly %d, got %d", MaxHistory, len(s.History))
+	}
+	// 队首为最近、队尾为最旧
+	if !s.History[0].Equal(p("G")) {
+		t.Errorf("history front should be newest G, got %+v", s.History[0])
+	}
+	if !s.History[len(s.History)-1].Equal(p("C")) {
+		t.Errorf("history tail should be oldest C, got %+v", s.History[len(s.History)-1])
+	}
+}
+
+func TestProfileAddDelete(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	s := &Store{Profiles: map[string]Profile{}}
+	s.Profiles["方案A"] = p("方案A")
+	s.Profiles["方案B"] = p("方案B")
+	if err := Save(path, s); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Profiles) != 2 {
+		t.Fatalf("expected 2 profiles, got %d", len(got.Profiles))
+	}
+	// 同名覆盖
+	over := p("方案A")
+	over.OldValue = "changed"
+	got.Profiles["方案A"] = over
+	if err := Save(path, got); err != nil {
+		t.Fatal(err)
+	}
+	got2, _ := Load(path)
+	if !got2.Profiles["方案A"].Equal(over) {
+		t.Errorf("overwrite not persisted: %+v", got2.Profiles["方案A"])
+	}
+	// 删除
+	delete(got2.Profiles, "方案A")
+	if err := Save(path, got2); err != nil {
+		t.Fatal(err)
+	}
+	got3, _ := Load(path)
+	if _, ok := got3.Profiles["方案A"]; ok {
+		t.Error("profile A should be deleted")
+	}
+	if len(got3.Profiles) != 1 {
+		t.Errorf("expected 1 profile after delete, got %d", len(got3.Profiles))
+	}
+}
+
+func TestPushHistoryDedupe(t *testing.T) {
+	s := &Store{Profiles: map[string]Profile{}}
+	s.PushHistory(p("A"))
+	s.PushHistory(p("A")) // 与队首相同：连续去重
+	if len(s.History) != 1 {
+		t.Errorf("expected 1 history entry after dedupe, got %d", len(s.History))
+	}
+}
+
+func TestLoadNilProfilesNormalized(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"last":{"name":"x"}}`), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Profiles == nil {
+		t.Error("Profiles should be non-nil after load")
+	}
+	if len(s.Profiles) != 0 {
+		t.Errorf("expected empty profiles, got %d", len(s.Profiles))
+	}
+	if s.Last == nil || s.Last.Name != "x" {
+		t.Errorf("last should be loaded, got %+v", s.Last)
 	}
 }
 
