@@ -445,8 +445,8 @@ func TestScanStopsWhenCancelled(t *testing.T) {
 	if len(derrs) != 0 {
 		t.Errorf("expected no dir errors, got %+v", derrs)
 	}
-	if len(hits) < 1 {
-		t.Errorf("expected partial hits, got %d", len(hits))
+	if len(hits) != 1 {
+		t.Errorf("expected exactly 1 partial hit, got %d", len(hits))
 	}
 }
 
@@ -478,8 +478,8 @@ func TestExecCancelled(t *testing.T) {
 	if res.Err != nil {
 		t.Fatalf("expected no error, got %v", res.Err)
 	}
-	if res.Skipped == "" {
-		t.Fatalf("expected skipped (cancelled), got %+v", res)
+	if res.Skipped != "用户已请求中止" {
+		t.Fatalf("expected skipped (cancelled), got %q", res.Skipped)
 	}
 	if res.BackupPath != "" || res.NewFilePath != "" {
 		t.Errorf("cancelled exec must not create backup/new files, got backup=%q new=%q", res.BackupPath, res.NewFilePath)
