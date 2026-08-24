@@ -274,9 +274,8 @@ func (mw *MainWin) onScan() {
 		mw.showConfigError(err)
 		return
 	}
-	mw.cancelScan.Store(false)
 	mw.scanPartial = false
-	cfg.Cancel = func() bool { return mw.cancelScan.Load() }
+	mw.bindCancel(&cfg)
 	mw.setBusy(true)
 	mw.logf("==== 开始扫描 ====")
 	mw.logf("目标目录 %d 个，配置文件 %v，原值 %q", len(cfg.RootDirs), cfg.FileNames, cfg.OldValue)
@@ -292,15 +291,7 @@ func (mw *MainWin) onScan() {
 			}
 			if serr == core.ErrCancelled {
 				mw.scanPartial = true
-				mw.lastHits = hits
-				paths := make([]string, 0, len(hits))
-				for _, h := range hits {
-					paths = append(paths, h.Path)
-				}
-				mw.hitsList.SetModel(paths)
-				for _, de := range dirErrs {
-					mw.logf("  跳过不可访问项: %s（%v）", de.Path, de.Err)
-				}
+				mw.renderHits(hits, dirErrs)
 				mw.logf("扫描已停止：命中 %d 个配置文件（未完成，仅部分结果）", len(hits))
 				mw.status.SetText(fmt.Sprintf("扫描已停止，命中 %d 个（部分结果）", len(hits)))
 				return
@@ -310,15 +301,7 @@ func (mw *MainWin) onScan() {
 				mw.status.SetText("扫描出错")
 				return
 			}
-			for _, de := range dirErrs {
-				mw.logf("  跳过不可访问项: %s（%v）", de.Path, de.Err)
-			}
-			mw.lastHits = hits
-			paths := make([]string, 0, len(hits))
-			for _, h := range hits {
-				paths = append(paths, h.Path)
-			}
-			mw.hitsList.SetModel(paths)
+			mw.renderHits(hits, dirErrs)
 			mw.logf("扫描完成：命中 %d 个配置文件", len(hits))
 			mw.status.SetText(fmt.Sprintf("扫描完成，命中 %d 个", len(hits)))
 			if len(hits) == 0 {
@@ -351,8 +334,7 @@ func (mw *MainWin) onExec() {
 		return
 	}
 
-	mw.cancelScan.Store(false)
-	cfg.Cancel = func() bool { return mw.cancelScan.Load() }
+	mw.bindCancel(&cfg)
 
 	// open the run log file (best effort; failure is non-fatal)
 	logf, lerr := openRunLog()
@@ -429,7 +411,11 @@ func (mw *MainWin) onExec() {
 			mw.logf("==== %s ====", summary)
 			mw.status.SetText(summary)
 			mw.setBusy(false)
-			walk.MsgBox(mw, "完成", summary, walk.MsgBoxIconInformation)
+			title := "完成"
+			if stopped {
+				title = "已中止"
+			}
+			walk.MsgBox(mw, title, summary, walk.MsgBoxIconInformation)
 		})
 	}()
 }
@@ -449,6 +435,25 @@ func (mw *MainWin) setBusy(b bool) {
 	mw.scanBtn.SetEnabled(!b)
 	mw.execBtn.SetEnabled(!b)
 	mw.stopBtn.SetEnabled(b)
+}
+
+// bindCancel 重置并绑定取消回调：操作开始前调用，置位停止标志即通过 cfg.Cancel 反馈给 core。
+func (mw *MainWin) bindCancel(cfg *core.Config) {
+	mw.cancelScan.Store(false)
+	cfg.Cancel = func() bool { return mw.cancelScan.Load() }
+}
+
+// renderHits 将命中结果写入界面列表，并记录扫描中遇到的不可访问项。
+func (mw *MainWin) renderHits(hits []core.Hit, dirErrs []core.ScanError) {
+	mw.lastHits = hits
+	paths := make([]string, 0, len(hits))
+	for _, h := range hits {
+		paths = append(paths, h.Path)
+	}
+	mw.hitsList.SetModel(paths)
+	for _, de := range dirErrs {
+		mw.logf("  跳过不可访问项: %s（%v）", de.Path, de.Err)
+	}
 }
 
 func (mw *MainWin) logf(format string, args ...interface{}) {
