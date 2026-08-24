@@ -184,7 +184,10 @@ func main() {
 	mw.Closing().Attach(func(canceled *bool, reason walk.CloseReason) {
 		mw.closed = true
 		mw.cancelScan.Store(true) // 关闭窗口同时停止后台扫描/替换
-		mw.saveLast()
+		if mw.autosaveTimer != nil {
+			mw.autosaveTimer.Stop() // 停掉未触发的防抖计时器，避免关闭瞬间重复写盘
+		}
+		mw.saveLast() // 兜底保存最后一次配置
 	})
 	if code := mw.Run(); code != 0 {
 		os.Exit(code)
@@ -303,7 +306,7 @@ func (mw *MainWin) collectProfile() configstore.Profile {
 		}
 	}
 	return configstore.Profile{
-		RootDirs:      mw.dirs,
+		RootDirs:      append([]string(nil), mw.dirs...), // 深拷贝，避免与界面目录列表共享底层数组
 		FileNames:     names,
 		OldValue:      mw.oldEdit.Text(),
 		NewValue:      mw.newEdit.Text(),
@@ -353,9 +356,17 @@ func (mw *MainWin) saveLast() {
 		return
 	}
 	mw.store.SaveLast(mw.collectProfile())
+	mw.rollbackBtn.SetEnabled(len(mw.store.History) > 0)
+	mw.persist()
+}
+
+// persist 把 store 写盘；失败记日志并返回 false。
+func (mw *MainWin) persist() bool {
 	if err := configstore.Save(mw.configPath, mw.store); err != nil {
 		mw.logf("保存配置失败：%v", err)
+		return false
 	}
+	return true
 }
 
 func (mw *MainWin) onSaveProfile() {
@@ -372,8 +383,7 @@ func (mw *MainWin) onSaveProfile() {
 	p := mw.collectProfile()
 	p.Name = name
 	mw.store.Profiles[name] = p
-	if err := configstore.Save(mw.configPath, mw.store); err != nil {
-		mw.logf("保存配置失败：%v", err)
+	if !mw.persist() {
 		return
 	}
 	mw.refreshProfilesCombo()
@@ -381,7 +391,7 @@ func (mw *MainWin) onSaveProfile() {
 }
 
 func (mw *MainWin) onLoadProfile() {
-	name := mw.profilesCombo.Text()
+	name := strings.TrimSpace(mw.profilesCombo.Text())
 	p, ok := mw.store.Profiles[name]
 	if !ok {
 		walk.MsgBox(mw, "提示", "请选择要加载的方案。", walk.MsgBoxIconInformation)
@@ -389,12 +399,13 @@ func (mw *MainWin) onLoadProfile() {
 	}
 	mw.store.PushHistory(mw.collectProfile()) // 当前状态入历史，可回滚
 	mw.applyProfile(p)
+	mw.persist()
 	mw.refreshProfilesCombo()
 	mw.logf("已加载方案「%s」", name)
 }
 
 func (mw *MainWin) onDeleteProfile() {
-	name := mw.profilesCombo.Text()
+	name := strings.TrimSpace(mw.profilesCombo.Text())
 	if _, ok := mw.store.Profiles[name]; !ok {
 		return
 	}
@@ -402,9 +413,7 @@ func (mw *MainWin) onDeleteProfile() {
 		return
 	}
 	delete(mw.store.Profiles, name)
-	if err := configstore.Save(mw.configPath, mw.store); err != nil {
-		mw.logf("保存配置失败：%v", err)
-	}
+	mw.persist()
 	mw.refreshProfilesCombo()
 	mw.logf("已删除方案「%s」", name)
 }
@@ -416,9 +425,7 @@ func (mw *MainWin) onRollback() {
 		return
 	}
 	mw.applyProfile(p)
-	if err := configstore.Save(mw.configPath, mw.store); err != nil {
-		mw.logf("保存配置失败：%v", err)
-	}
+	mw.persist()
 	mw.refreshProfilesCombo()
 	mw.logf("已回滚到上一版配置")
 }
