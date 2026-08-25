@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -34,11 +35,12 @@ type MainWin struct {
 	execBtn *walk.PushButton
 	stopBtn *walk.PushButton
 
-	saveProfileBtn *walk.PushButton
-	loadProfileBtn *walk.PushButton
-	delProfileBtn  *walk.PushButton
-	rollbackBtn    *walk.PushButton
-	profilesCombo  *walk.ComboBox
+	saveProfileBtn  *walk.PushButton
+	loadProfileBtn  *walk.PushButton
+	delProfileBtn   *walk.PushButton
+	rollbackBtn     *walk.PushButton
+	profilesCombo   *walk.ComboBox
+	profileNameEdit *walk.LineEdit
 
 	hitsList *walk.ListBox
 
@@ -73,7 +75,11 @@ func main() {
 				Title:  "配置方案（保存 / 加载 / 删除 / 回滚）",
 				Layout: decl.VBox{Spacing: 4},
 				Children: []decl.Widget{
-					decl.ComboBox{AssignTo: &mw.profilesCombo, Editable: true},
+					decl.ComboBox{AssignTo: &mw.profilesCombo}, // 非可编辑下拉框：可靠显示并选中方案
+					decl.LineEdit{
+						AssignTo:    &mw.profileNameEdit,
+						ToolTipText: "保存为方案时在此输入新方案名；留空则覆盖当前选中的方案",
+					},
 					decl.Composite{
 						Layout: decl.HBox{Spacing: 6},
 						Children: []decl.Widget{
@@ -129,6 +135,7 @@ func main() {
 					decl.LineEdit{AssignTo: &mw.oldEdit, OnTextChanged: mw.scheduleAutosave},
 					decl.Label{Text: "新字符串（替换为）"},
 					decl.LineEdit{AssignTo: &mw.newEdit, OnTextChanged: mw.scheduleAutosave},
+					decl.PushButton{Text: "⇅ 交换原/新字符串", ColumnSpan: 2, OnClicked: mw.onSwapOldNew},
 					decl.CheckBox{
 						AssignTo:         &mw.caseCk,
 						Text:             "允许仅大小写变更",
@@ -329,15 +336,29 @@ func (mw *MainWin) applyProfile(p configstore.Profile) {
 	mw.caseCk.SetChecked(p.CaseOnlyAllow)
 }
 
-// refreshProfilesCombo 用方案名（排序后）刷新下拉框。
+// refreshProfilesCombo 用方案名（排序后）刷新下拉框；非可编辑框自动选中当前项或第一项，避免关闭态显示为空。
 func (mw *MainWin) refreshProfilesCombo() {
+	prev := mw.profilesCombo.Text()
+	names := mw.profileNames()
+	mw.profilesCombo.SetModel(names)
+	if len(names) > 0 {
+		idx := 0
+		if i := slices.Index(names, prev); i >= 0 {
+			idx = i
+		}
+		mw.profilesCombo.SetCurrentIndex(idx)
+	}
+	mw.rollbackBtn.SetEnabled(len(mw.store.History) > 0)
+}
+
+// profileNames 返回排序后的方案名列表。
+func (mw *MainWin) profileNames() []string {
 	names := make([]string, 0, len(mw.store.Profiles))
 	for n := range mw.store.Profiles {
 		names = append(names, n)
 	}
 	sort.Strings(names)
-	mw.profilesCombo.SetModel(names)
-	mw.rollbackBtn.SetEnabled(len(mw.store.History) > 0)
+	return names
 }
 
 // scheduleAutosave 变更后防抖 500ms 自动保存 last；可被控件事件与目录变更调用。
@@ -375,9 +396,12 @@ func (mw *MainWin) persist() bool {
 }
 
 func (mw *MainWin) onSaveProfile() {
-	name := strings.TrimSpace(mw.profilesCombo.Text())
+	name := strings.TrimSpace(mw.profileNameEdit.Text())
 	if name == "" {
-		walk.MsgBox(mw, "提示", "请先在方案下拉框输入方案名称。", walk.MsgBoxIconInformation)
+		name = strings.TrimSpace(mw.profilesCombo.Text()) // 未填新名则覆盖当前选中的方案
+	}
+	if name == "" {
+		walk.MsgBox(mw, "提示", "请先在「方案名」输入框填写方案名称。", walk.MsgBoxIconInformation)
 		return
 	}
 	if _, exists := mw.store.Profiles[name]; exists {
@@ -393,7 +417,10 @@ func (mw *MainWin) onSaveProfile() {
 		return
 	}
 	mw.refreshProfilesCombo()
-	mw.profilesCombo.SetText(name) // 恢复刚输入/选中的方案名
+	if i := slices.Index(mw.profileNames(), name); i >= 0 {
+		mw.profilesCombo.SetCurrentIndex(i) // 选中刚保存的方案
+	}
+	mw.profileNameEdit.SetText("") // 清空方案名输入
 	mw.logf("已保存方案「%s」", name)
 }
 
@@ -435,6 +462,14 @@ func (mw *MainWin) onRollback() {
 	mw.persist()
 	mw.refreshProfilesCombo()
 	mw.logf("已回滚到上一版配置")
+}
+
+// onSwapOldNew 交换原字符串与新字符串输入框的内容（交换后自动触发防抖保存）。
+func (mw *MainWin) onSwapOldNew() {
+	old := mw.oldEdit.Text()
+	mw.oldEdit.SetText(mw.newEdit.Text())
+	mw.newEdit.SetText(old)
+	mw.logf("已交换原字符串与新字符串")
 }
 
 // ---------- config building ----------
