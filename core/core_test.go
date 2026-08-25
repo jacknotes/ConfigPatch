@@ -525,3 +525,17 @@ func TestPrepareRegex(t *testing.T) {
 		t.Errorf("expected old value regex error, got %v", err)
 	}
 }
+
+func TestValidateRegexSkipsSameValueCheck(t *testing.T) {
+	dir := t.TempDir()
+	// 正则模式：原字符串是正则，无法与字面量比较，跳过拦截
+	c := Config{RootDirs: []string{dir}, FileNames: []string{"web.config"}, OldValue: "a+", NewValue: "a+", RegexEnable: true}
+	if err := Validate(c); err != nil {
+		t.Errorf("regex mode must skip same-value check, got %v", err)
+	}
+	// 精确模式仍拦截
+	c2 := Config{RootDirs: []string{dir}, FileNames: []string{"web.config"}, OldValue: "abc", NewValue: "abc"}
+	if err := Validate(c2); err != ErrSameValue {
+		t.Errorf("literal mode must keep same-value check, got %v", err)
+	}
+}

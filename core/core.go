@@ -75,9 +75,11 @@ func Validate(c Config) error {
 	if strings.TrimSpace(c.NewValue) == "" {
 		return errors.New("新字符串不能为空")
 	}
-	// "新值=原值" guard: default compares case-insensitively; with the
-	// "允许仅大小写变更" switch on it compares exactly.
-	if c.CaseOnlyAllow {
+	// "新值=原值" guard：默认比较忽略大小写；"允许仅大小写变更"开启时精确比较。
+	// 正则模式：原字符串是正则表达式，无法与字面量比较，跳过该拦截。
+	if c.RegexEnable {
+		// no-op
+	} else if c.CaseOnlyAllow {
 		if c.OldValue == c.NewValue {
 			return ErrSameValue
 		}
