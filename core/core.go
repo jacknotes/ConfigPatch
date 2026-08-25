@@ -281,6 +281,15 @@ func ReplaceAllCI(s, old, new string) (string, int) {
 	return b.String(), count
 }
 
+// replaceAll 按当前模式替换所有命中并返回替换次数。
+// 正则模式：ReplaceAllString 天然支持 $1/${name} 捕获组；计数取非重叠命中数。
+func (c Config) replaceAll(text string) (string, int) {
+	if c.RegexEnable {
+		return c.oldRe.ReplaceAllString(text, c.NewValue), len(c.oldRe.FindAllStringIndex(text, -1))
+	}
+	return ReplaceAllCI(text, c.OldValue, c.NewValue)
+}
+
 // ExecResult describes the outcome of processing one hit.
 type ExecResult struct {
 	Hit
@@ -301,6 +310,13 @@ type ExecResult struct {
 //  5. verify the original now contains NewValue; roll back from the snapshot on failure
 func ExecOne(h Hit, c Config) ExecResult {
 	res := ExecResult{Hit: h}
+	// 防御：正则模式未预编译时现编译一次（与 Scan 一致）。
+	if pc, perr := ensurePrepared(c); perr != nil {
+		res.Err = perr
+		return res
+	} else {
+		c = pc
+	}
 	// 用户已请求停止：不读取、不触碰原文件，也不创建备份目录。
 	if c.Cancel != nil && c.Cancel() {
 		res.Skipped = "用户已请求中止"
@@ -338,7 +354,7 @@ func ExecOne(h Hit, c Config) ExecResult {
 		res.Err = fmt.Errorf("解码失败: %v", derr)
 		return res
 	}
-	if !ContainsCI(text, c.OldValue) {
+	if !c.matchText(text) {
 		res.Skipped = "执行时已不再包含原字符串，已跳过"
 		step("  - 跳过: %s", res.Skipped)
 		return res
@@ -356,7 +372,7 @@ func ExecOne(h Hit, c Config) ExecResult {
 	step("  - 备份原文件 → %s", backupPath)
 
 	// 2) build the modified copy with the ORIGINAL encoding
-	newText, n := ReplaceAllCI(text, c.OldValue, c.NewValue)
+	newText, n := c.replaceAll(text)
 	res.ReplacedCount = n
 	newRaw, eerr := Encode(enc, newText)
 	if eerr != nil {
@@ -380,7 +396,7 @@ func ExecOne(h Hit, c Config) ExecResult {
 
 	// 4) verify the original now contains NewValue; roll back on failure
 	verifyText, verr := ReadText(h.Path)
-	if verr == nil && ContainsCI(verifyText, c.NewValue) {
+	if verr == nil && verifyText == newText {
 		res.Verified = true
 		step("  - 校验通过（替换 %d 处）", res.ReplacedCount)
 		return res

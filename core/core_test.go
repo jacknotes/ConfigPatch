@@ -588,13 +588,16 @@ func TestScanRegexFileNames(t *testing.T) {
 func TestRegexCaseSensitive(t *testing.T) {
 	root := t.TempDir()
 	// 正则默认区分大小写
-	c, _ := Prepare(Config{
+	c, err := Prepare(Config{
 		RootDirs:    []string{root},
 		FileNames:   []string{"web.config"},
 		OldValue:    "abc",
 		NewValue:    "xyz",
 		RegexEnable: true,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !c.matchText("hello abc") {
 		t.Error("expected exact-case match")
 	}
@@ -602,13 +605,16 @@ func TestRegexCaseSensitive(t *testing.T) {
 		t.Error("regex must be case-sensitive by default")
 	}
 	// (?i) 前缀不区分大小写
-	ci, _ := Prepare(Config{
+	ci, err := Prepare(Config{
 		RootDirs:    []string{root},
 		FileNames:   []string{"web.config"},
 		OldValue:    "(?i)abc",
 		NewValue:    "xyz",
 		RegexEnable: true,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !ci.matchText("hello ABC") {
 		t.Error("(?i) prefix must make match case-insensitive")
 	}
@@ -672,5 +678,190 @@ func TestScanRegexLazyPrepare(t *testing.T) {
 	}
 	if len(hits) != 1 {
 		t.Errorf("expected 1 hit, got %d", len(hits))
+	}
+}
+
+func TestRegexReplaceWithCapture(t *testing.T) {
+	root := t.TempDir()
+	cfgFile := filepath.Join(root, "web.config")
+	content := "Host=192.168.1.10\r\nHost=10.0.0.5\r\nnothing"
+	if err := os.WriteFile(cfgFile, []byte(content), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Prepare(Config{
+		RootDirs:    []string{root},
+		FileNames:   []string{"web.config"},
+		OldValue:    `Host=(\d+\.\d+\.\d+\.\d+)`,
+		NewValue:    `Host=$1:8080`,
+		RegexEnable: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits, _, err := Scan(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("expected 1 hit, got %d", len(hits))
+	}
+	res := ExecOne(hits[0], c)
+	if res.Err != nil {
+		t.Fatalf("exec failed: %v", res.Err)
+	}
+	if res.Skipped != "" {
+		t.Fatalf("unexpected skip: %s", res.Skipped)
+	}
+	if !res.Verified {
+		t.Error("expected verified")
+	}
+	if res.RolledBack {
+		t.Error("expected no rollback")
+	}
+	if res.ReplacedCount != 2 {
+		t.Errorf("expected 2 replacements, got %d", res.ReplacedCount)
+	}
+	got, _ := os.ReadFile(cfgFile)
+	want := "Host=192.168.1.10:8080\r\nHost=10.0.0.5:8080\r\nnothing"
+	if string(got) != want {
+		t.Errorf("content mismatch:\n got=%q\nwant=%q", got, want)
+	}
+}
+
+func TestRegexVerifyWhenNewMatchesPattern(t *testing.T) {
+	// 用户场景：新字符串本身命中原正则，校验必须通过、不得回滚。
+	root := t.TempDir()
+	cfgFile := filepath.Join(root, "web.config")
+	content := `<add key="version" value="2025" />`
+	if err := os.WriteFile(cfgFile, []byte(content), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Prepare(Config{
+		RootDirs:    []string{root},
+		FileNames:   []string{"web.config"},
+		OldValue:    `value="\d+"`,
+		NewValue:    `value="2026"`,
+		RegexEnable: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits, _, err := Scan(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("expected 1 hit, got %d", len(hits))
+	}
+	res := ExecOne(hits[0], c)
+	if res.Err != nil {
+		t.Fatalf("exec failed: %v", res.Err)
+	}
+	if res.Skipped != "" {
+		t.Fatalf("unexpected skip: %s", res.Skipped)
+	}
+	if !res.Verified {
+		t.Error("expected verified even though new text still matches old pattern")
+	}
+	if res.RolledBack {
+		t.Error("must NOT roll back when replacement itself matches the old regex")
+	}
+	got, _ := os.ReadFile(cfgFile)
+	if !strings.Contains(string(got), `value="2026"`) {
+		t.Errorf("original not updated: %s", got)
+	}
+}
+
+func TestRegexExecSkipsWhenNoLongerMatches(t *testing.T) {
+	root := t.TempDir()
+	cfgFile := filepath.Join(root, "web.config")
+	if err := os.WriteFile(cfgFile, []byte("hello 123"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Prepare(Config{
+		RootDirs:    []string{root},
+		FileNames:   []string{"web.config"},
+		OldValue:    `\d+`,
+		NewValue:    "X",
+		RegexEnable: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits, _, err := Scan(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 {
+		t.Fatal("expected 1 hit")
+	}
+	// 执行时内容已不再命中 -> 跳过、不改动、不备份
+	if err := os.WriteFile(cfgFile, []byte("hello"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	res := ExecOne(hits[0], c)
+	if res.Skipped == "" {
+		t.Errorf("expected skip, got %+v", res)
+	}
+	if res.Err != nil {
+		t.Errorf("expected no error, got %v", res.Err)
+	}
+	got, _ := os.ReadFile(cfgFile)
+	if string(got) != "hello" {
+		t.Errorf("original was modified: %q", got)
+	}
+}
+
+func TestPrepareFailureLeavesNoResidue(t *testing.T) {
+	dir := t.TempDir()
+	// 文件名正则编译成功、但 OldValue 编译失败：返回的 Config 不应携带半成品正则
+	bad := Config{RootDirs: []string{dir}, FileNames: []string{"web.config"}, OldValue: "(", NewValue: "x", RegexEnable: true}
+	c, err := Prepare(bad)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if len(c.nameRes) != 0 || c.oldRe != nil {
+		t.Errorf("failed Prepare must not leave residue; nameRes=%d oldRe=%v", len(c.nameRes), c.oldRe)
+	}
+}
+
+func TestScanRegexLazyFailure(t *testing.T) {
+	// 正则模式 + 非法正则，未 Prepare 直接 Scan：应返回编译错误而非 panic
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "web.config"), []byte("hello"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	c := Config{RootDirs: []string{root}, FileNames: []string{"web.config"}, OldValue: "(", NewValue: "x", RegexEnable: true}
+	if _, _, err := Scan(c); err == nil || !strings.Contains(err.Error(), "原字符串正则非法") {
+		t.Errorf("expected old-regex compile error, got %v", err)
+	}
+}
+
+func TestExecRegexLazyPrepare(t *testing.T) {
+	// 未 Prepare 直接 ExecOne（正则模式）：守卫应自动编译，不 panic、正常执行
+	root := t.TempDir()
+	cfgFile := filepath.Join(root, "web.config")
+	content := "hello 123"
+	if err := os.WriteFile(cfgFile, []byte(content), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	c := Config{RootDirs: []string{root}, FileNames: []string{"web.config"}, OldValue: `\d+`, NewValue: "X", RegexEnable: true}
+	hits, _, err := Scan(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("expected 1 hit, got %d", len(hits))
+	}
+	res := ExecOne(hits[0], c)
+	if res.Err != nil {
+		t.Fatalf("exec failed: %v", res.Err)
+	}
+	if !res.Verified {
+		t.Error("expected verified")
+	}
+	got, _ := os.ReadFile(cfgFile)
+	if string(got) != "hello X" {
+		t.Errorf("content mismatch: got %q", got)
 	}
 }
