@@ -492,3 +492,36 @@ func TestExecCancelled(t *testing.T) {
 		t.Errorf("backup-config dir should not exist after cancelled exec")
 	}
 }
+
+func TestPrepareRegex(t *testing.T) {
+	dir := t.TempDir()
+	base := Config{RootDirs: []string{dir}, FileNames: []string{"web.config"}, OldValue: "abc", NewValue: "abd", RegexEnable: true}
+
+	// 合法正则：编译成功并填充预编译正则
+	c, err := Prepare(base)
+	if err != nil {
+		t.Fatalf("expected nil, got %v", err)
+	}
+	if len(c.nameRes) != 1 || c.oldRe == nil {
+		t.Errorf("expected 1 name regex + old regex, got nameRes=%d oldRe nil=%v", len(c.nameRes), c.oldRe == nil)
+	}
+
+	// 非法文件名正则：报错并指明第 N 项
+	bad := base
+	bad.FileNames = []string{"("}
+	if _, err := Prepare(bad); err == nil || !strings.Contains(err.Error(), "配置文件名称第 1 项") {
+		t.Errorf("expected 1st filename regex error, got %v", err)
+	}
+	bad = base
+	bad.FileNames = []string{"web.config", "["}
+	if _, err := Prepare(bad); err == nil || !strings.Contains(err.Error(), "配置文件名称第 2 项") {
+		t.Errorf("expected 2nd filename regex error, got %v", err)
+	}
+
+	// 非法原字符串正则：报错
+	bad = base
+	bad.OldValue = "("
+	if _, err := Prepare(bad); err == nil || !strings.Contains(err.Error(), "原字符串正则非法") {
+		t.Errorf("expected old value regex error, got %v", err)
+	}
+}

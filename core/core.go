@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -25,6 +26,10 @@ type Config struct {
 	OldValue      string   // string to find (case-insensitive)
 	NewValue      string   // string to replace with (exact text written)
 	CaseOnlyAllow bool     // true: new==old compared exactly (allows case-only change); false: case-insensitive
+	RegexEnable   bool     // true: 文件名/原字符串按正则解释，新字符串支持 $1 捕获组
+	// prepared: 由 Prepare 填充；RegexEnable 时非 nil，否则为 nil。
+	nameRes []*regexp.Regexp // 文件名正则（自动加 (?i)^(?:...)$，完整匹配、不区分大小写）
+	oldRe   *regexp.Regexp   // 原字符串正则
 	// Logf, when non-nil, receives detailed step-by-step progress during
 	// ExecOne (处理 → 备份 → 生成新文件 → 覆盖 → 校验/回滚). It is optional
 	// and must be safe to call from the goroutine that runs ExecOne.
@@ -82,6 +87,31 @@ func Validate(c Config) error {
 		}
 	}
 	return nil
+}
+
+// Prepare 校验输入并预编译正则；返回的 Config 供 Scan/ExecOne 使用。
+// RegexEnable 时：文件名每项编译为 (?i)^(?:<pattern>)$（完整匹配、不区分大小写），
+// OldValue 编译为原字符串正则；编译失败返回带具体位置的中文错误。
+func Prepare(c Config) (Config, error) {
+	if err := Validate(c); err != nil {
+		return c, err
+	}
+	if !c.RegexEnable {
+		return c, nil
+	}
+	for i, n := range c.FileNames {
+		re, err := regexp.Compile("(?i)^(?:" + n + ")$")
+		if err != nil {
+			return c, fmt.Errorf("配置文件名称第 %d 项正则非法: %v", i+1, err)
+		}
+		c.nameRes = append(c.nameRes, re)
+	}
+	re, err := regexp.Compile(c.OldValue)
+	if err != nil {
+		return c, fmt.Errorf("原字符串正则非法: %v", err)
+	}
+	c.oldRe = re
+	return c, nil
 }
 
 // Hit describes one config file found to contain the old value.
