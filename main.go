@@ -30,6 +30,7 @@ type MainWin struct {
 	oldEdit   *walk.LineEdit
 	newEdit   *walk.LineEdit
 	caseCk    *walk.CheckBox
+	caseLbl   *walk.Label
 
 	scanBtn *walk.PushButton
 	execBtn *walk.PushButton
@@ -73,22 +74,23 @@ func main() {
 		Children: []decl.Widget{
 			decl.GroupBox{
 				Title:  "配置方案（保存 / 加载 / 删除 / 回滚）",
-				Layout: decl.VBox{Spacing: 4},
+				Layout: decl.HBox{Spacing: 6}, // 一行多列：方案下拉 + 新方案名 + 操作按钮全部横排
 				Children: []decl.Widget{
-					decl.ComboBox{AssignTo: &mw.profilesCombo}, // 非可编辑下拉框：可靠显示并选中方案
+					decl.Label{Text: "方案:"},
+					decl.ComboBox{
+						AssignTo: &mw.profilesCombo, // 非可编辑下拉框：可靠显示并选中方案
+						MinSize:  decl.Size{Width: 250},
+					},
+					decl.Label{Text: "新方案名:"},
 					decl.LineEdit{
 						AssignTo:    &mw.profileNameEdit,
+						MinSize:     decl.Size{Width: 140},
 						ToolTipText: "保存为方案时在此输入新方案名；留空则覆盖当前选中的方案",
 					},
-					decl.Composite{
-						Layout: decl.HBox{Spacing: 6},
-						Children: []decl.Widget{
-							decl.PushButton{AssignTo: &mw.saveProfileBtn, Text: "保存为方案", OnClicked: mw.onSaveProfile},
-							decl.PushButton{AssignTo: &mw.loadProfileBtn, Text: "加载", OnClicked: mw.onLoadProfile},
-							decl.PushButton{AssignTo: &mw.delProfileBtn, Text: "删除", OnClicked: mw.onDeleteProfile},
-							decl.PushButton{AssignTo: &mw.rollbackBtn, Text: "回滚上一版", OnClicked: mw.onRollback},
-						},
-					},
+					decl.PushButton{AssignTo: &mw.saveProfileBtn, Text: "保存", OnClicked: mw.onSaveProfile},
+					decl.PushButton{AssignTo: &mw.loadProfileBtn, Text: "加载", OnClicked: mw.onLoadProfile},
+					decl.PushButton{AssignTo: &mw.delProfileBtn, Text: "删除", OnClicked: mw.onDeleteProfile},
+					decl.PushButton{AssignTo: &mw.rollbackBtn, Text: "回滚", OnClicked: mw.onRollback},
 				},
 			},
 			decl.GroupBox{
@@ -127,24 +129,65 @@ func main() {
 			},
 			decl.GroupBox{
 				Title:  "参数配置",
-				Layout: decl.Grid{Columns: 2, Spacing: 6},
+				Layout: decl.Grid{Columns: 3, Spacing: 6},
 				Children: []decl.Widget{
-					decl.Label{Text: "配置文件名称（多个用逗号分隔）"},
-					decl.LineEdit{AssignTo: &mw.namesEdit, Text: "web.config", OnTextChanged: mw.scheduleAutosave},
-					decl.Label{Text: "原字符串（查找并替换，不区分大小写）"},
-					decl.LineEdit{AssignTo: &mw.oldEdit, OnTextChanged: mw.scheduleAutosave},
-					decl.Label{Text: "新字符串（替换为）"},
-					decl.LineEdit{AssignTo: &mw.newEdit, OnTextChanged: mw.scheduleAutosave},
-					decl.PushButton{Text: "⇅ 交换原/新字符串", ColumnSpan: 2, OnClicked: mw.onSwapOldNew},
-					decl.CheckBox{
-						AssignTo:         &mw.caseCk,
-						Text:             "允许仅大小写变更",
-						ColumnSpan:       2,
-						OnCheckedChanged: mw.scheduleAutosave,
+					decl.Label{Text: "配置文件名称", Row: 0, Column: 0},
+					decl.LineEdit{
+						AssignTo:      &mw.namesEdit,
+						Text:          "web.config",
+						Row:           0,
+						Column:        1,
+						OnTextChanged: mw.scheduleAutosave,
+						ToolTipText:   "多个文件名用逗号分隔，如 web.config,app.config",
+					},
+					decl.Label{Text: "原字符串", Row: 1, Column: 0},
+					decl.LineEdit{
+						AssignTo:      &mw.oldEdit,
+						Row:           1,
+						Column:        1,
+						OnTextChanged: mw.scheduleAutosave,
+						ToolTipText:   "要查找并替换的字符串，不区分大小写",
+					},
+					decl.PushButton{
+						Text:        "⇅",
+						Row:         1,
+						Column:      2,
+						RowSpan:     2,                     // 纵向跨「原字符串 + 新字符串」两行
+						Alignment:   decl.AlignHFarVCenter, // 按钮在两行之间垂直居中（Walk 原生按钮不可拉伸填充两行）
+						OnClicked:   mw.onSwapOldNew,
+						ToolTipText: "交换原字符串与新字符串",
+					},
+					decl.Label{Text: "新字符串", Row: 2, Column: 0},
+					decl.LineEdit{
+						AssignTo:      &mw.newEdit,
+						Row:           2,
+						Column:        1,
+						OnTextChanged: mw.scheduleAutosave,
+						ToolTipText:   "替换为的字符串",
+					},
+					decl.Composite{
+						Row:        3,
+						Column:     0,
+						ColumnSpan: 3,
+						Layout:     decl.HBox{Spacing: 0},
+						Children: []decl.Widget{
+							decl.CheckBox{
+								AssignTo:         &mw.caseCk,
+								Text:             "允许", // 剩余文字用可点击 Label 补齐，规避 Walk 对 CJK 复选框文字的截断
+								OnCheckedChanged: mw.scheduleAutosave,
+							},
+							decl.Label{
+								AssignTo:  &mw.caseLbl,
+								Text:      "仅大小写变更",
+								OnMouseUp: mw.toggleCaseOnly,
+							},
+						},
 					},
 					decl.Label{
 						Text:       "说明：勾选后，新值与原值仅大小写不同也会执行替换；不勾选则视为相同并中止。",
-						ColumnSpan: 2,
+						Row:        4,
+						Column:     0,
+						ColumnSpan: 3,
 					},
 				},
 			},
@@ -470,6 +513,13 @@ func (mw *MainWin) onSwapOldNew() {
 	mw.oldEdit.SetText(mw.newEdit.Text())
 	mw.newEdit.SetText(old)
 	mw.logf("已交换原字符串与新字符串")
+}
+
+// toggleCaseOnly 点击「仅大小写变更」文字时切换复选框状态。
+func (mw *MainWin) toggleCaseOnly(x, y int, button walk.MouseButton) {
+	if button == walk.LeftButton {
+		mw.caseCk.SetChecked(!mw.caseCk.Checked())
+	}
 }
 
 // ---------- config building ----------
