@@ -231,6 +231,14 @@ func main() {
 		log.Fatal(err)
 	}
 	mw.initConfig()
+	// 窗口首次显示后重新应用一次下拉高度修复（此时布局已完成，否则组合框会被压成一行导致下拉塌陷）
+	firstShow := true
+	mw.VisibleChanged().Attach(func() {
+		if firstShow {
+			firstShow = false
+			mw.refreshProfilesCombo()
+		}
+	})
 	mw.Closing().Attach(func(canceled *bool, reason walk.CloseReason) {
 		mw.closed = true
 		mw.cancelScan.Store(true) // 关闭窗口同时停止后台扫描/替换
@@ -392,6 +400,32 @@ func (mw *MainWin) refreshProfilesCombo() {
 		mw.profilesCombo.SetCurrentIndex(idx)
 	}
 	mw.rollbackBtn.SetEnabled(len(mw.store.History) > 0)
+	mw.fixComboDropDownHeight(len(names)) // 修复下拉列表塌陷（见 fixComboDropDownHeight 注释）
+}
+
+// fixComboDropDownHeight 修复 Win32 下拉列表塌陷（约 2px，几乎不可见）的问题：
+// CBS_DROPDOWNLIST 的下拉列表高度跟随组合框高度，但 Walk 布局会把组合框压成
+// 一行（约 21px），导致点击下拉箭头时弹出框只有 2px 高、看不到任何方案（只能用
+// 方向键切换）。这里把组合框临时拉高，让 Windows 为下拉列表预留足够高度以显示
+// 全部方案；之后 Walk 重新布局会把组合框压回一行，但下拉高度会保留。
+func (mw *MainWin) fixComboDropDownHeight(count int) {
+	if mw.profilesCombo == nil {
+		return
+	}
+	visible := count
+	if visible > 10 {
+		visible = 10 // 上限，避免方案过多时下拉过长
+	}
+	itemH := int(mw.profilesCombo.SendMessage(win.CB_GETITEMHEIGHT, 0, 0))
+	if itemH <= 0 {
+		itemH = 15
+	}
+	r := mw.profilesCombo.BoundsPixels()
+	if r.Height <= 0 {
+		return // 窗口尚未完成布局，待 VisibleChanged 后再应用
+	}
+	// 实测：下拉高度 ≈ 组合框高度 - 32，故需多预留一项高度（+1）才能显示全部方案
+	win.MoveWindow(mw.profilesCombo.Handle(), int32(r.X), int32(r.Y), int32(r.Width), int32(r.Height+itemH*(visible+1)), true)
 }
 
 // profileNames 返回排序后的方案名列表。
