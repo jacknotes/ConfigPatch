@@ -307,16 +307,17 @@ type ExecResult struct {
 //  2. snapshot original bytes -> backup-config\<base><ext>-<ts> (never overwritten)
 //  3. write the modified copy -> backup-config\<base>-new<ext> (original encoding)
 //  4. copy the modified copy over the original
-//  5. verify the original now contains NewValue; roll back from the snapshot on failure
+//  5. verify the original now equals the text we wrote (whole-file text
+//     comparison, decoded with the exec-time encoding); roll back on failure
 func ExecOne(h Hit, c Config) ExecResult {
 	res := ExecResult{Hit: h}
 	// 防御：正则模式未预编译时现编译一次（与 Scan 一致）。
-	if pc, perr := ensurePrepared(c); perr != nil {
+	pc, perr := ensurePrepared(c)
+	if perr != nil {
 		res.Err = perr
 		return res
-	} else {
-		c = pc
 	}
+	c = pc
 	// 用户已请求停止：不读取、不触碰原文件，也不创建备份目录。
 	if c.Cancel != nil && c.Cancel() {
 		res.Skipped = "用户已请求中止"
@@ -394,8 +395,14 @@ func ExecOne(h Hit, c Config) ExecResult {
 	}
 	step("  - 覆盖原文件")
 
-	// 4) verify the original now contains NewValue; roll back on failure
-	verifyText, verr := ReadText(h.Path)
+	// 4) verify the original now equals the text we wrote; roll back on failure.
+	// 用执行时捕获的 enc 解码校验，而不是重新检测编码：替换后的字节可能恰好构成
+	// 合法 UTF-8（如 GBK 文件），重新检测会翻转编码，导致误判内容不一致并回滚。
+	verifyRaw, verr := os.ReadFile(h.Path)
+	var verifyText string
+	if verr == nil {
+		verifyText, verr = Decode(enc, verifyRaw)
+	}
 	if verr == nil && verifyText == newText {
 		res.Verified = true
 		step("  - 校验通过（替换 %d 处）", res.ReplacedCount)
@@ -411,7 +418,7 @@ func ExecOne(h Hit, c Config) ExecResult {
 	if verr != nil {
 		res.Err = fmt.Errorf("替换后校验失败（读取错误: %v），已自动回滚", verr)
 	} else {
-		res.Err = errors.New("替换后校验失败（未找到新值），已自动回滚")
+		res.Err = errors.New("替换后校验失败（内容不一致），已自动回滚")
 	}
 	return res
 }

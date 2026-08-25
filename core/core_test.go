@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -863,5 +864,112 @@ func TestExecRegexLazyPrepare(t *testing.T) {
 	got, _ := os.ReadFile(cfgFile)
 	if string(got) != "hello X" {
 		t.Errorf("content mismatch: got %q", got)
+	}
+}
+
+func TestExecVerifyUsesSameEncoding(t *testing.T) {
+	// GBK 文件中，替换后剩余字节恰好构成合法 UTF-8：校验必须用执行时捕获的编码解码，
+	// 否则 DetectEncoding 翻转为 UTF-8，导致误判内容不一致并回滚（应通过、不回滚）。
+	root := t.TempDir()
+	cfgFile := filepath.Join(root, "web.config")
+	// 0xC2 0x80 同时是合法 UTF-8（U+0080）与有效 GBK 双字节；0x81 0x61 是 GBK 双字节但非合法 UTF-8。
+	raw := []byte{0xC2, 0x80, 0x81, 0x61}
+	if k := DetectEncoding(raw); k != EncGBK {
+		t.Fatalf("precondition: expected EncGBK, got %v", k)
+	}
+	if err := os.WriteFile(cfgFile, raw, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	text, err := Decode(EncGBK, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runes := []rune(text)
+	if len(runes) != 2 {
+		t.Fatalf("precondition: expected 2 runes, got %d (%q)", len(runes), text)
+	}
+	// 把"非合法 UTF-8 的 GBK 双字节"解码出的第二个字符替换为 'X'，剩余字节变为合法 UTF-8。
+	del := runes[1]
+	c, err := Prepare(Config{
+		RootDirs:   []string{root},
+		FileNames:  []string{"web.config"},
+		OldValue:   regexp.QuoteMeta(string(del)),
+		NewValue:   "X",
+		RegexEnable: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits, _, err := Scan(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("expected 1 hit, got %d", len(hits))
+	}
+	res := ExecOne(hits[0], c)
+	if res.Err != nil {
+		t.Fatalf("exec failed: %v", res.Err)
+	}
+	if res.RolledBack {
+		t.Fatal("must NOT roll back when re-detected encoding differs from exec-time encoding")
+	}
+	if !res.Verified {
+		t.Error("expected verified")
+	}
+	got, _ := os.ReadFile(cfgFile)
+	want := []byte{0xC2, 0x80, 'X'}
+	if !bytes.Equal(got, want) {
+		t.Errorf("content mismatch: got %x, want %x", got, want)
+	}
+}
+
+func TestExecRegexUTF16(t *testing.T) {
+	root := t.TempDir()
+	cfgFile := filepath.Join(root, "web.config")
+	content := "Hello 123"
+	e16 := unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM).NewEncoder()
+	body, err := e16.Bytes([]byte(content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw16 := append([]byte{0xFF, 0xFE}, body...)
+	if err := os.WriteFile(cfgFile, raw16, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Prepare(Config{
+		RootDirs:   []string{root},
+		FileNames:  []string{"web.config"},
+		OldValue:   `\d+`,
+		NewValue:   "X",
+		RegexEnable: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits, _, err := Scan(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("expected 1 hit, got %d", len(hits))
+	}
+	res := ExecOne(hits[0], c)
+	if res.Err != nil {
+		t.Fatalf("exec failed: %v", res.Err)
+	}
+	if res.RolledBack {
+		t.Error("expected no rollback")
+	}
+	if !res.Verified {
+		t.Error("expected verified")
+	}
+	got, _ := os.ReadFile(cfgFile)
+	gotText, err := Decode(DetectEncoding(got), got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotText != "Hello X" {
+		t.Errorf("content mismatch: %q", gotText)
 	}
 }
