@@ -539,3 +539,138 @@ func TestValidateRegexSkipsSameValueCheck(t *testing.T) {
 		t.Errorf("literal mode must keep same-value check, got %v", err)
 	}
 }
+
+func TestScanRegexFileNames(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"web-1.config":   `<add key="k" value="abc" />`,
+		"web-2.config":   "abc",
+		"Web-3.Config":   "abc", // 大小写不同也应命中（避免与 web-1.config 在大小写不敏感文件系统上冲突）
+		"myweb-1.config": "abc", // 部分命中但不应整名匹配
+		"web.config.bak": "abc", // 后缀不匹配
+		"app.config":     "abc",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o666); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c, err := Prepare(Config{
+		RootDirs:    []string{root},
+		FileNames:   []string{`^web-.*\.config$`},
+		OldValue:    "abc",
+		NewValue:    "xyz",
+		RegexEnable: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits, _, err := Scan(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, h := range hits {
+		got[filepath.Base(h.Path)] = true
+	}
+	for _, want := range []string{"web-1.config", "web-2.config", "Web-3.Config"} {
+		if !got[want] {
+			t.Errorf("missing hit %s; got %v", want, got)
+		}
+	}
+	for _, not := range []string{"myweb-1.config", "web.config.bak", "app.config"} {
+		if got[not] {
+			t.Errorf("unexpected hit %s; got %v", not, got)
+		}
+	}
+}
+
+func TestRegexCaseSensitive(t *testing.T) {
+	root := t.TempDir()
+	// 正则默认区分大小写
+	c, _ := Prepare(Config{
+		RootDirs:    []string{root},
+		FileNames:   []string{"web.config"},
+		OldValue:    "abc",
+		NewValue:    "xyz",
+		RegexEnable: true,
+	})
+	if !c.matchText("hello abc") {
+		t.Error("expected exact-case match")
+	}
+	if c.matchText("hello ABC") {
+		t.Error("regex must be case-sensitive by default")
+	}
+	// (?i) 前缀不区分大小写
+	ci, _ := Prepare(Config{
+		RootDirs:    []string{root},
+		FileNames:   []string{"web.config"},
+		OldValue:    "(?i)abc",
+		NewValue:    "xyz",
+		RegexEnable: true,
+	})
+	if !ci.matchText("hello ABC") {
+		t.Error("(?i) prefix must make match case-insensitive")
+	}
+}
+
+func TestPrepareRegexHardening(t *testing.T) {
+	dir := t.TempDir()
+
+	// RegexEnable=false：不预编译，字段保持 nil
+	c, err := Prepare(Config{RootDirs: []string{dir}, FileNames: []string{"web.config"}, OldValue: "abc", NewValue: "abd"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.RegexEnable || len(c.nameRes) != 0 || c.oldRe != nil {
+		t.Errorf("literal mode must not precompile; nameRes=%d oldRe=%v", len(c.nameRes), c.oldRe)
+	}
+
+	// 多个合法文件名正则：编译数量=2
+	c, err = Prepare(Config{RootDirs: []string{dir}, FileNames: []string{"web.*", "app.*"}, OldValue: "abc", NewValue: "abd", RegexEnable: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.nameRes) != 2 {
+		t.Errorf("expected 2 name regexes, got %d", len(c.nameRes))
+	}
+
+	// 幂等：对已预编译的 Config 再 Prepare，不重复追加
+	c2, err := Prepare(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c2.nameRes) != 2 {
+		t.Errorf("Prepare must be idempotent; got %d name regexes", len(c2.nameRes))
+	}
+
+	// Validate 错误先于编译暴露：目录不存在时报目录错误而非正则错误
+	bad := Config{RootDirs: []string{filepath.Join(dir, "nope")}, FileNames: []string{"("}, OldValue: "abc", NewValue: "abd", RegexEnable: true}
+	if _, err := Prepare(bad); err == nil || !strings.Contains(err.Error(), "目标目录不可访问") {
+		t.Errorf("Validate error must surface before compile, got %v", err)
+	}
+
+	// 零宽正则被拒绝
+	for _, pat := range []string{"(?i)", "a*", "a?"} {
+		zw := Config{RootDirs: []string{dir}, FileNames: []string{"web.config"}, OldValue: pat, NewValue: "x", RegexEnable: true}
+		if _, err := Prepare(zw); err == nil || !strings.Contains(err.Error(), "不能匹配空字符串") {
+			t.Errorf("zero-width pattern %q must be rejected, got %v", pat, err)
+		}
+	}
+}
+
+func TestScanRegexLazyPrepare(t *testing.T) {
+	// 未调用 Prepare 直接 Scan（正则模式）：守卫应自动编译，不 panic
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "web.config"), []byte("hello 123"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	c := Config{RootDirs: []string{root}, FileNames: []string{"web.config"}, OldValue: `\d+`, NewValue: "X", RegexEnable: true}
+	hits, _, err := Scan(c)
+	if err != nil {
+		t.Fatalf("lazy prepare should not error, got %v", err)
+	}
+	if len(hits) != 1 {
+		t.Errorf("expected 1 hit, got %d", len(hits))
+	}
+}

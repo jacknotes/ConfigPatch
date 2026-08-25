@@ -94,26 +94,44 @@ func Validate(c Config) error {
 // Prepare 校验输入并预编译正则；返回的 Config 供 Scan/ExecOne 使用。
 // RegexEnable 时：文件名每项编译为 (?i)^(?:<pattern>)$（完整匹配、不区分大小写），
 // OldValue 编译为原字符串正则；编译失败返回带具体位置的中文错误。
+// 幂等：已预编译（oldRe 非 nil）时直接返回，避免重复追加 nameRes。
 func Prepare(c Config) (Config, error) {
 	if err := Validate(c); err != nil {
 		return c, err
 	}
-	if !c.RegexEnable {
+	if !c.RegexEnable || c.oldRe != nil {
 		return c, nil
 	}
+	// 先构建到局部，出错时不返回携带半成品正则的 Config。
+	nameRes := make([]*regexp.Regexp, 0, len(c.FileNames))
 	for i, n := range c.FileNames {
 		re, err := regexp.Compile("(?i)^(?:" + n + ")$")
 		if err != nil {
 			return c, fmt.Errorf("配置文件名称第 %d 项正则非法: %v", i+1, err)
 		}
-		c.nameRes = append(c.nameRes, re)
+		nameRes = append(nameRes, re)
 	}
 	re, err := regexp.Compile(c.OldValue)
 	if err != nil {
 		return c, fmt.Errorf("原字符串正则非法: %v", err)
 	}
+	// 拒绝可匹配空字符串的正则（如 (?i) 或 a*）：否则每个文件都命中、替换会在所有位置插入。
+	if re.MatchString("") {
+		return c, errors.New("原字符串正则不能匹配空字符串（如 (?i) 或 a*），请检查")
+	}
+	c.nameRes = nameRes
 	c.oldRe = re
 	return c, nil
+}
+
+// ensurePrepared 保证 RegexEnable 时 nameRes/oldRe 已编译；未编译则现编译一次。
+// 生产路径由 buildConfig→Prepare 预编译，此守卫仅防御漏调 Prepare 的调用方，
+// 避免 Scan/ExecOne 解引用空指针。
+func ensurePrepared(c Config) (Config, error) {
+	if !c.RegexEnable || c.oldRe != nil {
+		return c, nil
+	}
+	return Prepare(c)
 }
 
 // Hit describes one config file found to contain the old value.
@@ -132,6 +150,10 @@ type ScanError struct {
 // OldValue (case-insensitive). Directories named backup-config are skipped,
 // and inaccessible entries are collected into dirErrors without aborting.
 func Scan(c Config) (hits []Hit, dirErrors []ScanError, err error) {
+	// 防御：正则模式未预编译时现编译一次。
+	if c, err = ensurePrepared(c); err != nil {
+		return nil, nil, err
+	}
 	names := make(map[string]struct{}, len(c.FileNames))
 	for _, n := range c.FileNames {
 		names[strings.ToLower(strings.TrimSpace(n))] = struct{}{}
@@ -155,10 +177,10 @@ func Scan(c Config) (hits []Hit, dirErrors []ScanError, err error) {
 				}
 				return nil
 			}
-			if _, ok := names[strings.ToLower(d.Name())]; !ok {
+			if !c.matchFileName(d.Name(), names) {
 				return nil
 			}
-			contains, rerr := FileContainsCI(path, c.OldValue)
+			contains, rerr := fileMatches(path, c)
 			if rerr != nil {
 				dirErrors = append(dirErrors, ScanError{Path: path, Err: rerr})
 				return nil
@@ -182,6 +204,38 @@ func ReadText(path string) (string, error) {
 		return "", err
 	}
 	return Decode(DetectEncoding(raw), raw)
+}
+
+// matchFileName 判断文件名是否命中：正则模式任一正则完整匹配（不区分大小写），
+// 精确模式大小写不敏感全等。names 为精确模式的预处理小写名集合。
+func (c Config) matchFileName(name string, names map[string]struct{}) bool {
+	if c.RegexEnable {
+		for _, re := range c.nameRes {
+			if re.MatchString(name) {
+				return true
+			}
+		}
+		return false
+	}
+	_, ok := names[strings.ToLower(name)]
+	return ok
+}
+
+// matchText 判断已解码文本是否命中原字符串。
+func (c Config) matchText(text string) bool {
+	if c.RegexEnable {
+		return c.oldRe.MatchString(text)
+	}
+	return ContainsCI(text, c.OldValue)
+}
+
+// fileMatches 读取文件解码后判断内容是否命中原字符串。
+func fileMatches(path string, c Config) (bool, error) {
+	text, err := ReadText(path)
+	if err != nil {
+		return false, err
+	}
+	return c.matchText(text), nil
 }
 
 // FileContainsCI reports whether the file (decoded with its own encoding)
