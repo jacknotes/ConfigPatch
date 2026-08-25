@@ -30,6 +30,8 @@ type MainWin struct {
 	oldEdit   *walk.LineEdit
 	newEdit   *walk.LineEdit
 	caseCk    *walk.CheckBox
+	regexCk   *walk.CheckBox
+	paramHint *walk.Label // 参数配置区说明文字（正则开/关时显示不同文案）
 
 	scanBtn *walk.PushButton
 	execBtn *walk.PushButton
@@ -171,17 +173,27 @@ func main() {
 					// 单个复选框承载完整文字：文字天然连在一起（不再拆成复选框短文本 + 可点击 Label，
 					// 避免两者之间出现空隙），点击框或文字均可切换。
 					decl.CheckBox{
+						AssignTo:         &mw.regexCk,
+						Text:             "启用正则匹配",
+						Row:              3,
+						Column:           0,
+						ColumnSpan:       3,
+						MinSize:          decl.Size{Width: 220},
+						OnCheckedChanged: mw.onRegexToggle,
+					},
+					decl.CheckBox{
 						AssignTo:         &mw.caseCk,
 						Text:             "允许仅大小写变更",
-						Row:              3,
+						Row:              4,
 						Column:           0,
 						ColumnSpan:       3,
 						MinSize:          decl.Size{Width: 220},
 						OnCheckedChanged: mw.scheduleAutosave,
 					},
 					decl.Label{
+						AssignTo:   &mw.paramHint,
 						Text:       "说明：勾选后，新值与原值仅大小写不同也会执行替换；不勾选则视为相同并中止。",
-						Row:        4,
+						Row:        5,
 						Column:     0,
 						ColumnSpan: 3,
 					},
@@ -428,6 +440,7 @@ func (mw *MainWin) collectProfile() configstore.Profile {
 		OldValue:      mw.oldEdit.Text(),
 		NewValue:      mw.newEdit.Text(),
 		CaseOnlyAllow: mw.caseCk.Checked(),
+		RegexEnable:   mw.regexCk.Checked(),
 	}
 }
 
@@ -450,7 +463,9 @@ func (mw *MainWin) applyProfile(p configstore.Profile) {
 	mw.namesEdit.SetText(strings.Join(p.FileNames, ","))
 	mw.oldEdit.SetText(p.OldValue)
 	mw.newEdit.SetText(p.NewValue)
-	mw.caseCk.SetChecked(p.CaseOnlyAllow)
+	mw.regexCk.SetChecked(p.RegexEnable)
+	mw.applyRegexUIState()
+	mw.caseCk.SetChecked(p.CaseOnlyAllow && !p.RegexEnable)
 }
 
 // refreshProfilesCombo 用方案名（排序后）刷新下拉框；非可编辑框自动选中当前项或第一项，避免关闭态显示为空。
@@ -635,6 +650,29 @@ func (mw *MainWin) onSwapOldNew() {
 	mw.logf("已交换原字符串与新字符串")
 }
 
+// onRegexToggle 切换正则开关：联动禁用「允许仅大小写变更」、刷新说明与 ToolTip、触发自动保存。
+func (mw *MainWin) onRegexToggle() {
+	mw.applyRegexUIState()
+	mw.scheduleAutosave()
+}
+
+// applyRegexUIState 根据正则开关刷新界面联动状态。
+func (mw *MainWin) applyRegexUIState() {
+	on := mw.regexCk.Checked()
+	mw.caseCk.SetEnabled(!on)
+	if on {
+		mw.paramHint.SetText("说明：正则模式——文件名须匹配整个名称（不区分大小写）；原字符串为 RE2 正则，默认区分大小写，(?i) 前缀不区分；新字符串 $1/${name} 为捕获组引用，$$ 为字面 $；不支持 lookaround 与 \\1。")
+		mw.namesEdit.SetToolTipText("多个正则用逗号分隔，须匹配整个文件名（自动加 ^...$），不区分大小写")
+		mw.oldEdit.SetToolTipText("RE2 正则，默认区分大小写；(?i) 前缀表示不区分大小写")
+		mw.newEdit.SetToolTipText("支持 $1/${name} 捕获组引用；$$ 表示字面 $")
+	} else {
+		mw.paramHint.SetText("说明：勾选后，新值与原值仅大小写不同也会执行替换；不勾选则视为相同并中止。")
+		mw.namesEdit.SetToolTipText("多个文件名用逗号分隔，如 web.config,app.config")
+		mw.oldEdit.SetToolTipText("要查找并替换的字符串，不区分大小写")
+		mw.newEdit.SetToolTipText("替换为的字符串")
+	}
+}
+
 // ---------- config building ----------
 
 func (mw *MainWin) buildConfig() (core.Config, error) {
@@ -644,11 +682,9 @@ func (mw *MainWin) buildConfig() (core.Config, error) {
 		OldValue:      mw.oldEdit.Text(),
 		NewValue:      mw.newEdit.Text(),
 		CaseOnlyAllow: mw.caseCk.Checked(),
+		RegexEnable:   mw.regexCk.Checked(),
 	}
-	if err := core.Validate(cfg); err != nil {
-		return cfg, err
-	}
-	return cfg, nil
+	return core.Prepare(cfg)
 }
 
 // ---------- actions ----------
