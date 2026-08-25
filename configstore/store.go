@@ -19,6 +19,7 @@ type Profile struct {
 	OldValue      string   `json:"oldValue,omitempty"`
 	NewValue      string   `json:"newValue,omitempty"`
 	CaseOnlyAllow bool     `json:"caseOnlyAllow,omitempty"`
+	RegexEnable   bool     `json:"regexEnable,omitempty"` // 启用正则匹配（旧配置缺失时默认 false）
 }
 
 // Equal 判断两个 Profile 内容是否相同（含切片字段）。
@@ -27,6 +28,7 @@ func (p Profile) Equal(o Profile) bool {
 		p.OldValue == o.OldValue &&
 		p.NewValue == o.NewValue &&
 		p.CaseOnlyAllow == o.CaseOnlyAllow &&
+		p.RegexEnable == o.RegexEnable &&
 		slices.Equal(p.RootDirs, o.RootDirs) &&
 		slices.Equal(p.FileNames, o.FileNames)
 }

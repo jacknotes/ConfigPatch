@@ -222,3 +222,30 @@ func TestRollback(t *testing.T) {
 		t.Error("expected no rollback on empty history")
 	}
 }
+
+func TestProfileEqualRegexEnable(t *testing.T) {
+	a := Profile{Name: "A", OldValue: "a", NewValue: "b"}
+	b := a
+	if !a.Equal(b) {
+		t.Error("identical profiles should be equal")
+	}
+	b.RegexEnable = true
+	if a.Equal(b) {
+		t.Error("RegexEnable difference must make profiles unequal")
+	}
+}
+
+func TestLoadWithoutRegexEnableDefaultsFalse(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	raw := `{"profiles": {"A": {"name":"A","oldValue":"a","newValue":"b"}}}`
+	if err := os.WriteFile(path, []byte(raw), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Profiles["A"].RegexEnable {
+		t.Error("missing regexEnable must default to false (backward compatible)")
+	}
+}
