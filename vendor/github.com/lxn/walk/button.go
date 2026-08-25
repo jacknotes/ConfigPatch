@@ -229,7 +229,15 @@ func (b *Button) idealSize() Size {
 	var s win.SIZE
 	b.SendMessage(win.BCM_GETIDEALSIZE, 0, uintptr(unsafe.Pointer(&s)))
 
-	return maxSize(sizeFromSIZE(s), min)
+	size := maxSize(sizeFromSIZE(s), min)
+
+	// BCM_GETIDEALSIZE 对 CJK 长文本会返回偏小的宽度，导致复选框/按钮文字被截断。
+	// 这里保证理想宽度不小于布局显式指定的 MinSize，使 MinSize 真正生效。
+	if minWidth := b.MinSizePixels().Width; minWidth > size.Width {
+		size.Width = minWidth
+	}
+
+	return size
 }
 
 func (b *Button) CreateLayoutItem(ctx *LayoutContext) LayoutItem {

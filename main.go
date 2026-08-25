@@ -30,7 +30,6 @@ type MainWin struct {
 	oldEdit   *walk.LineEdit
 	newEdit   *walk.LineEdit
 	caseCk    *walk.CheckBox
-	caseLbl   *walk.Label
 
 	scanBtn *walk.PushButton
 	execBtn *walk.PushButton
@@ -79,7 +78,11 @@ func main() {
 					decl.Label{Text: "方案:"},
 					decl.ComboBox{
 						AssignTo: &mw.profilesCombo, // 非可编辑下拉框：可靠显示并选中方案
-						MinSize:  decl.Size{Width: 250},
+						// 固定宽度：下拉框理想宽度会随最长方案名自适应而无限变大
+						//（方案名/文件名过长时会把整行甚至整个窗口撑爆），
+						// 这里同时设置 Min/Max 把宽度锁定在一个合适值。
+						MinSize: decl.Size{Width: 250},
+						MaxSize: decl.Size{Width: 250},
 					},
 					decl.Label{Text: "新方案名:"},
 					decl.LineEdit{
@@ -165,23 +168,16 @@ func main() {
 						OnTextChanged: mw.scheduleAutosave,
 						ToolTipText:   "替换为的字符串",
 					},
-					decl.Composite{
-						Row:        3,
-						Column:     0,
-						ColumnSpan: 3,
-						Layout:     decl.HBox{Spacing: 0},
-						Children: []decl.Widget{
-							decl.CheckBox{
-								AssignTo:         &mw.caseCk,
-								Text:             "允许", // 剩余文字用可点击 Label 补齐，规避 Walk 对 CJK 复选框文字的截断
-								OnCheckedChanged: mw.scheduleAutosave,
-							},
-							decl.Label{
-								AssignTo:  &mw.caseLbl,
-								Text:      "仅大小写变更",
-								OnMouseUp: mw.toggleCaseOnly,
-							},
-						},
+					// 单个复选框承载完整文字：文字天然连在一起（不再拆成复选框短文本 + 可点击 Label，
+					// 避免两者之间出现空隙），点击框或文字均可切换。
+					decl.CheckBox{
+						AssignTo:         &mw.caseCk,
+						Text:             "允许仅大小写变更",
+						Row:              3,
+						Column:           0,
+						ColumnSpan:       3,
+						MinSize:          decl.Size{Width: 220},
+						OnCheckedChanged: mw.scheduleAutosave,
 					},
 					decl.Label{
 						Text:       "说明：勾选后，新值与原值仅大小写不同也会执行替换；不勾选则视为相同并中止。",
@@ -231,6 +227,9 @@ func main() {
 		log.Fatal(err)
 	}
 	mw.initConfig()
+	// 目标目录 / 命中文件列表挂载右键复制菜单（右键先选中光标下的项，再弹「复制 / 复制全部」）。
+	mw.attachListCopyMenu(mw.dirsList)
+	mw.attachListCopyMenu(mw.hitsList)
 	// 窗口布局完成后再应用一次下拉高度修复：declarative.Create 时窗口已 Show
 	//（VisibleChanged 已触发过），布局要等消息循环开始后才完成，故用延时+重试。
 	mw.applyComboHeightAfterLayout(0)
@@ -328,6 +327,78 @@ func (mw *MainWin) onStop() {
 	mw.cancelScan.Store(true)
 	mw.logf("用户请求停止，正在中断…")
 	mw.status.SetText("正在停止...")
+}
+
+// ---------- 列表右键复制 ----------
+
+// attachListCopyMenu 给列表控件挂载右键菜单：
+// 1) 右键按下时先把光标下的项设为当前选中项（LB_ITEMFROMPOINT），
+//    保证「复制」复制的是右键点击的那一项而非此前选中的项；
+// 2) 菜单提供「复制」（选中项）与「复制全部」（所有项）两项。
+func (mw *MainWin) attachListCopyMenu(lb *walk.ListBox) {
+	lb.MouseUp().Attach(func(x, y int, button walk.MouseButton) {
+		if button != walk.RightButton {
+			return
+		}
+		// LB_ITEMFROMPOINT：LOWORD=光标处项索引，HIWORD=是否在客户区外。
+		index := int(int32(lb.SendMessage(win.LB_ITEMFROMPOINT, 0, uintptr(win.MAKELONG(uint16(x), uint16(y))))))
+		if model, ok := lb.Model().([]string); ok && index >= 0 && index < len(model) {
+			lb.SetCurrentIndex(index)
+		}
+	})
+
+	menu, err := walk.NewMenu()
+	if err != nil {
+		return
+	}
+	copyAct := walk.NewAction()
+	if err := copyAct.SetText("复制"); err != nil {
+		return
+	}
+	copyAct.Triggered().Attach(func() { mw.copyListSelected(lb) })
+	menu.Actions().Add(copyAct)
+
+	copyAllAct := walk.NewAction()
+	if err := copyAllAct.SetText("复制全部"); err != nil {
+		return
+	}
+	copyAllAct.Triggered().Attach(func() { mw.copyListAll(lb) })
+	menu.Actions().Add(copyAllAct)
+
+	lb.SetContextMenu(menu)
+}
+
+// copyListSelected 复制列表当前选中项到剪贴板。
+func (mw *MainWin) copyListSelected(lb *walk.ListBox) {
+	model, ok := lb.Model().([]string)
+	if !ok {
+		return
+	}
+	idx := lb.CurrentIndex()
+	if idx < 0 || idx >= len(model) {
+		mw.logf("没有可复制的选中项")
+		return
+	}
+	if err := walk.Clipboard().SetText(model[idx]); err != nil {
+		mw.logf("复制到剪贴板失败: %v", err)
+		return
+	}
+	mw.logf("已复制: %s", model[idx])
+}
+
+// copyListAll 复制列表全部项到剪贴板（每项一行）。
+func (mw *MainWin) copyListAll(lb *walk.ListBox) {
+	model, ok := lb.Model().([]string)
+	if !ok || len(model) == 0 {
+		mw.logf("列表为空，无可复制内容")
+		return
+	}
+	text := strings.Join(model, "\r\n")
+	if err := walk.Clipboard().SetText(text); err != nil {
+		mw.logf("复制到剪贴板失败: %v", err)
+		return
+	}
+	mw.logf("已复制全部 %d 项", len(model))
 }
 
 // ---------- 配置方案：加载 / 保存 / 自动记忆 / 回滚 ----------
@@ -562,13 +633,6 @@ func (mw *MainWin) onSwapOldNew() {
 	mw.oldEdit.SetText(mw.newEdit.Text())
 	mw.newEdit.SetText(old)
 	mw.logf("已交换原字符串与新字符串")
-}
-
-// toggleCaseOnly 点击「仅大小写变更」文字时切换复选框状态。
-func (mw *MainWin) toggleCaseOnly(x, y int, button walk.MouseButton) {
-	if button == walk.LeftButton {
-		mw.caseCk.SetChecked(!mw.caseCk.Checked())
-	}
 }
 
 // ---------- config building ----------
