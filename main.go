@@ -231,14 +231,9 @@ func main() {
 		log.Fatal(err)
 	}
 	mw.initConfig()
-	// 窗口首次显示后重新应用一次下拉高度修复（此时布局已完成，否则组合框会被压成一行导致下拉塌陷）
-	firstShow := true
-	mw.VisibleChanged().Attach(func() {
-		if firstShow {
-			firstShow = false
-			mw.refreshProfilesCombo()
-		}
-	})
+	// 窗口布局完成后再应用一次下拉高度修复：declarative.Create 时窗口已 Show
+	//（VisibleChanged 已触发过），布局要等消息循环开始后才完成，故用延时+重试。
+	mw.applyComboHeightAfterLayout(0)
 	mw.Closing().Attach(func(canceled *bool, reason walk.CloseReason) {
 		mw.closed = true
 		mw.cancelScan.Store(true) // 关闭窗口同时停止后台扫描/替换
@@ -422,10 +417,30 @@ func (mw *MainWin) fixComboDropDownHeight(count int) {
 	}
 	r := mw.profilesCombo.BoundsPixels()
 	if r.Height <= 0 {
-		return // 窗口尚未完成布局，待 VisibleChanged 后再应用
+		return // 窗口尚未完成布局，由 applyComboHeightAfterLayout 在布局完成后应用
 	}
 	// 实测：下拉高度 ≈ 组合框高度 - 32，故需多预留一项高度（+1）才能显示全部方案
 	win.MoveWindow(mw.profilesCombo.Handle(), int32(r.X), int32(r.Y), int32(r.Width), int32(r.Height+itemH*(visible+1)), true)
+}
+
+// applyComboHeightAfterLayout 在窗口完成首次布局后应用下拉高度修复。
+// declarative.Create 时窗口已 Show（VisibleChanged 已触发过），而布局要等消息
+// 循环开始后才完成，因此用延时 + 重试确保在组合框布局就绪后应用。
+func (mw *MainWin) applyComboHeightAfterLayout(attempt int) {
+	time.AfterFunc(150*time.Millisecond, func() {
+		mw.Synchronize(func() {
+			if mw.closed || mw.profilesCombo == nil {
+				return
+			}
+			if mw.profilesCombo.BoundsPixels().Height <= 0 {
+				if attempt < 20 {
+					mw.applyComboHeightAfterLayout(attempt + 1) // 布局未完成，稍后重试
+				}
+				return
+			}
+			mw.refreshProfilesCombo()
+		})
+	})
 }
 
 // profileNames 返回排序后的方案名列表。
