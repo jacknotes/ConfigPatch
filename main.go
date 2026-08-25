@@ -20,6 +20,19 @@ import (
 	"github.com/lxn/win"
 )
 
+// 参数配置区文案（paramHint / 三个输入框 ToolTip），正则开/关各一套；declarative 默认值与
+// applyRegexUIState 切换共用这些常量，避免两份拷贝失同步。
+const (
+	paramHintLiteral = "说明：勾选后，新值与原值仅大小写不同也会执行替换；不勾选则视为相同并中止。"
+	paramHintRegex   = "说明：正则模式：文件名 ^...$ 完整匹配；原字符串 RE2 正则（(?i) 不区分大小写）；新字符串支持 $1/${name} 捕获组。"
+	namesTipLiteral  = "多个文件名用逗号分隔，如 web.config,app.config"
+	namesTipRegex    = "多个正则用逗号分隔，须匹配整个文件名（自动加 ^...$），不区分大小写"
+	oldTipLiteral    = "要查找并替换的字符串，不区分大小写"
+	oldTipRegex      = "RE2 正则，默认区分大小写；(?i) 前缀表示不区分大小写；不支持 lookaround 与 \\1"
+	newTipLiteral    = "替换为的字符串"
+	newTipRegex      = "支持 $1/${name} 捕获组引用；$$ 表示字面 $"
+)
+
 // MainWin is the application's main window.
 type MainWin struct {
 	*walk.MainWindow
@@ -143,7 +156,7 @@ func main() {
 						Row:           0,
 						Column:        1,
 						OnTextChanged: mw.scheduleAutosave,
-						ToolTipText:   "多个文件名用逗号分隔，如 web.config,app.config",
+						ToolTipText:   namesTipLiteral,
 					},
 					decl.Label{Text: "原字符串", Row: 1, Column: 0},
 					decl.LineEdit{
@@ -151,7 +164,7 @@ func main() {
 						Row:           1,
 						Column:        1,
 						OnTextChanged: mw.scheduleAutosave,
-						ToolTipText:   "要查找并替换的字符串，不区分大小写",
+						ToolTipText:   oldTipLiteral,
 					},
 					decl.PushButton{
 						Text:        "⇅",
@@ -168,7 +181,7 @@ func main() {
 						Row:           2,
 						Column:        1,
 						OnTextChanged: mw.scheduleAutosave,
-						ToolTipText:   "替换为的字符串",
+						ToolTipText:   newTipLiteral,
 					},
 					// 单个复选框承载完整文字：文字天然连在一起（不再拆成复选框短文本 + 可点击 Label，
 					// 避免两者之间出现空隙），点击框或文字均可切换。
@@ -192,7 +205,7 @@ func main() {
 					},
 					decl.Label{
 						AssignTo:   &mw.paramHint,
-						Text:       "说明：勾选后，新值与原值仅大小写不同也会执行替换；不勾选则视为相同并中止。",
+						Text:       paramHintLiteral,
 						Row:        5,
 						Column:     0,
 						ColumnSpan: 3,
@@ -465,7 +478,7 @@ func (mw *MainWin) applyProfile(p configstore.Profile) {
 	mw.newEdit.SetText(p.NewValue)
 	mw.regexCk.SetChecked(p.RegexEnable)
 	mw.applyRegexUIState()
-	mw.caseCk.SetChecked(p.CaseOnlyAllow && !p.RegexEnable)
+	mw.caseCk.SetChecked(p.CaseOnlyAllow)
 }
 
 // refreshProfilesCombo 用方案名（排序后）刷新下拉框；非可编辑框自动选中当前项或第一项，避免关闭态显示为空。
@@ -661,15 +674,15 @@ func (mw *MainWin) applyRegexUIState() {
 	on := mw.regexCk.Checked()
 	mw.caseCk.SetEnabled(!on)
 	if on {
-		mw.paramHint.SetText("说明：正则模式——文件名须匹配整个名称（不区分大小写）；原字符串为 RE2 正则，默认区分大小写，(?i) 前缀不区分；新字符串 $1/${name} 为捕获组引用，$$ 为字面 $；不支持 lookaround 与 \\1。")
-		mw.namesEdit.SetToolTipText("多个正则用逗号分隔，须匹配整个文件名（自动加 ^...$），不区分大小写")
-		mw.oldEdit.SetToolTipText("RE2 正则，默认区分大小写；(?i) 前缀表示不区分大小写")
-		mw.newEdit.SetToolTipText("支持 $1/${name} 捕获组引用；$$ 表示字面 $")
+		mw.paramHint.SetText(paramHintRegex)
+		mw.namesEdit.SetToolTipText(namesTipRegex)
+		mw.oldEdit.SetToolTipText(oldTipRegex)
+		mw.newEdit.SetToolTipText(newTipRegex)
 	} else {
-		mw.paramHint.SetText("说明：勾选后，新值与原值仅大小写不同也会执行替换；不勾选则视为相同并中止。")
-		mw.namesEdit.SetToolTipText("多个文件名用逗号分隔，如 web.config,app.config")
-		mw.oldEdit.SetToolTipText("要查找并替换的字符串，不区分大小写")
-		mw.newEdit.SetToolTipText("替换为的字符串")
+		mw.paramHint.SetText(paramHintLiteral)
+		mw.namesEdit.SetToolTipText(namesTipLiteral)
+		mw.oldEdit.SetToolTipText(oldTipLiteral)
+		mw.newEdit.SetToolTipText(newTipLiteral)
 	}
 }
 
