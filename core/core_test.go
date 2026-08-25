@@ -891,10 +891,10 @@ func TestExecVerifyUsesSameEncoding(t *testing.T) {
 	// 把"非合法 UTF-8 的 GBK 双字节"解码出的第二个字符替换为 'X'，剩余字节变为合法 UTF-8。
 	del := runes[1]
 	c, err := Prepare(Config{
-		RootDirs:   []string{root},
-		FileNames:  []string{"web.config"},
-		OldValue:   regexp.QuoteMeta(string(del)),
-		NewValue:   "X",
+		RootDirs:    []string{root},
+		FileNames:   []string{"web.config"},
+		OldValue:    regexp.QuoteMeta(string(del)),
+		NewValue:    "X",
 		RegexEnable: true,
 	})
 	if err != nil {
@@ -938,10 +938,10 @@ func TestExecRegexUTF16(t *testing.T) {
 		t.Fatal(err)
 	}
 	c, err := Prepare(Config{
-		RootDirs:   []string{root},
-		FileNames:  []string{"web.config"},
-		OldValue:   `\d+`,
-		NewValue:   "X",
+		RootDirs:    []string{root},
+		FileNames:   []string{"web.config"},
+		OldValue:    `\d+`,
+		NewValue:    "X",
 		RegexEnable: true,
 	})
 	if err != nil {

@@ -477,6 +477,8 @@ func (mw *MainWin) applyProfile(p configstore.Profile) {
 	mw.oldEdit.SetText(p.OldValue)
 	mw.newEdit.SetText(p.NewValue)
 	mw.regexCk.SetChecked(p.RegexEnable)
+	// 显式再刷一次：SetChecked 仅在状态变化时触发 onRegexToggle，此处兜底
+	// 值未变化的情形，保证联动（caseCk 禁用、说明/ToolTip 文案）始终正确。
 	mw.applyRegexUIState()
 	mw.caseCk.SetChecked(p.CaseOnlyAllow)
 }
