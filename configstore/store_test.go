@@ -3,6 +3,7 @@ package configstore
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -247,5 +248,28 @@ func TestLoadWithoutRegexEnableDefaultsFalse(t *testing.T) {
 	}
 	if s.Profiles["A"].RegexEnable {
 		t.Error("missing regexEnable must default to false (backward compatible)")
+	}
+	// RegexEnable=true 经 Save→Load 后必须保留（防止 JSON tag 笔误静默丢失标志）
+	sp := s.Profiles["A"]
+	sp.RegexEnable = true
+	s.Profiles["A"] = sp
+	if err := Save(path, s); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.Profiles["A"].RegexEnable {
+		t.Error("RegexEnable=true must survive Save/Load round trip")
+	}
+	// 仅靠往返不足以发现 tag 笔误：Save/Load 共享同一 struct，键名拼错仍对称往返。
+	// 需直接断言序列化 JSON 中的键名，才能捕获 "regexEnable" 被拼错的静默丢失。
+	raw2, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw2), `"regexEnable": true`) {
+		t.Errorf("saved JSON must contain %q key, got:\n%s", `"regexEnable": true`, raw2)
 	}
 }
